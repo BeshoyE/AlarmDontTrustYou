@@ -12,25 +12,64 @@ struct QRScannerView: View {
   @Environment(\.dismiss) private var dismiss
   let onCancel: () -> Void
   let onScanned: (String) -> Void
+  let permissionService: PermissionServiceProtocol
+  
+  @State private var cameraPermissionStatus: PermissionStatus = .notDetermined
+  @State private var showPermissionBlocking = false
 
   var body: some View {
-
     NavigationStack {
-      CodeScannerView(
-        codeTypes: [.qr],
-        completion: handleScan
-      )
+      Group {
+        if cameraPermissionStatus == .authorized {
+          CodeScannerView(
+            codeTypes: [.qr],
+            completion: handleScan
+          )
+        } else if cameraPermissionStatus == .denied {
+          CameraPermissionBlockingView(
+            permissionService: permissionService,
+            onPermissionGranted: {
+              cameraPermissionStatus = .authorized
+            },
+            onCancel: {
+              onCancel()
+              dismiss()
+            }
+          )
+        } else {
+          ProgressView("Checking camera permission...")
+        }
+      }
       .navigationTitle("Scan QR")
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
-        ToolbarItem(placement: .cancellationAction) {
-          Button("Cancel") {
-            onCancel()
-            dismiss()
+        if cameraPermissionStatus == .authorized {
+          ToolbarItem(placement: .cancellationAction) {
+            Button("Cancel") {
+              onCancel()
+              dismiss()
+            }
           }
         }
       }
-
+      .onAppear {
+        checkCameraPermission()
+      }
+    }
+  }
+  
+  private func checkCameraPermission() {
+    let currentStatus = permissionService.checkCameraPermission()
+    
+    if currentStatus == .notDetermined {
+      Task {
+        let newStatus = await permissionService.requestCameraPermission()
+        await MainActor.run {
+          cameraPermissionStatus = newStatus
+        }
+      }
+    } else {
+      cameraPermissionStatus = currentStatus
     }
   }
 

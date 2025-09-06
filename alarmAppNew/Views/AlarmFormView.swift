@@ -96,7 +96,8 @@ struct AlarmFormView: View {
              onScanned: { scannedCode in
                  detailVM.draft.expectedQR = scannedCode
                  showQRScanner = false
-             }
+             },
+             permissionService: DependencyContainer.shared.permissionService
          )
      }
    }

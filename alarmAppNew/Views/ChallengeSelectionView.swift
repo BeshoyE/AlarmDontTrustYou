@@ -57,7 +57,8 @@ struct ChallengeSelectionView: View {
           }
           showingQRScanner = false
           dismiss()
-        }
+        },
+        permissionService: DependencyContainer.shared.permissionService
       )
     }
 

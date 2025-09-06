@@ -11,9 +11,11 @@ class DismissalFlowViewModel: ObservableObject {
   @Published var showQRSheet = false
   @Published var navigateToNextChallenge = false
   private let alarmID: UUID
+  private let permissionService: PermissionServiceProtocol
 
-  init(alarmID: UUID) {
+  init(alarmID: UUID, permissionService: PermissionServiceProtocol) {
     self.alarmID = alarmID
+    self.permissionService = permissionService
   }
 
   func start() {

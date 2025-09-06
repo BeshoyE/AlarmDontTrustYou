@@ -9,12 +9,13 @@ import SwiftUI
 
 struct AlarmsListView: View {
 
+  @Environment(\.scenePhase) private var scenePhase
   @EnvironmentObject private var router: AppRouter
   @StateObject private var vm: AlarmListViewModel
   @State private var detailVM: AlarmDetailViewModel?
 
   init() {
-        _vm = StateObject(wrappedValue: AlarmListViewModel())
+        _vm = StateObject(wrappedValue: DependencyContainer.shared.makeAlarmListViewModel())
     }
 
     // For testing/preview purposes with a pre-configured view model
@@ -36,10 +37,22 @@ struct AlarmsListView: View {
 
         // Alarm list
         List {
-          ForEach(vm.alarms) { alarm in
-            AlarmRowView(alarm: alarm) {
-                router.showDismissal(for: alarm.id)
+          // Permission warning section
+          if let permissionDetails = vm.notificationPermissionDetails {
+            Section {
+              NotificationPermissionInlineWarning(
+                permissionDetails: permissionDetails,
+                permissionService: DependencyContainer.shared.permissionService
+              )
             }
+          }
+          
+          ForEach(vm.alarms) { alarm in
+            AlarmRowView(
+              alarm: alarm,
+              onToggle: { vm.toggle(alarm) },
+              onTap: { router.showDismissal(for: alarm.id) }
+            )
             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
               Button(role: .destructive) {
                 vm.delete(alarm)
@@ -80,6 +93,22 @@ struct AlarmsListView: View {
         }
       }
       .navigationTitle("Alarms")
+      .toolbar {
+          ToolbarItem(placement: .navigationBarTrailing) {
+              DebugNotifButton()
+          }
+      }
+      .task {
+          vm.refreshPermission()
+        vm.ensureNotificationPermissionIfNeeded()
+      // initial fetch when the screen appears
+      }
+      .onChange(of: scenePhase) { _, phase in
+          if phase == .active {               // returning from Settings or prompt
+              vm.refreshPermission()
+          }
+      }
+
     }
     .sheet(item: $detailVM) { formVM in
       AlarmFormView(detailVM: formVM) {
@@ -92,6 +121,14 @@ struct AlarmsListView: View {
         detailVM = nil
       }
     }
+    .sheet(isPresented: $vm.showPermissionBlocking) {
+      NotificationPermissionBlockingView(
+        permissionService: DependencyContainer.shared.permissionService,
+        onPermissionGranted: {
+          vm.handlePermissionGranted()
+        }
+      )
+    }
     .onReceive(NotificationCenter.default.publisher(for: .alarmDidFire)) { note in
                 if let id = note.object as? UUID {
                     router.showDismissal(for: id)
@@ -103,6 +140,7 @@ struct AlarmsListView: View {
 // Separate row view for better organization
 struct AlarmRowView: View {
   let alarm: Alarm
+  let onToggle: () -> Void
   let onTap: () -> Void
 
   var body: some View {
@@ -132,9 +170,11 @@ struct AlarmRowView: View {
 
         Spacer()
 
-        Toggle("", isOn: .constant(alarm.isEnabled))
-          .labelsHidden()
-          .allowsHitTesting(false)
+        Toggle("", isOn: Binding(
+          get: { alarm.isEnabled },
+          set: { _ in onToggle() }
+        ))
+        .labelsHidden()
       }
       .padding(.vertical, 8)
     }
@@ -143,7 +183,16 @@ struct AlarmRowView: View {
 }
 
 #Preview {
-  let previewVM = AlarmListViewModel()
+  let mockPermissionService = PermissionService()
+  let mockNotificationService = NotificationService(permissionService: mockPermissionService)
+  let mockStorage = PersistenceService()
+  
+  let previewVM = AlarmListViewModel(
+    storage: mockStorage,
+    permissionService: mockPermissionService,
+    notificationService: mockNotificationService
+  )
+  
   previewVM.alarms = [
     Alarm(id: UUID(), time: Date(), label: "Morning", repeatDays: [.monday], challengeKind: [], isEnabled: true),
     Alarm(id: UUID(), time: Date(), label: "Work", repeatDays: [], challengeKind: [.math], isEnabled: true),

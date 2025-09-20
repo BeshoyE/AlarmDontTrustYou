@@ -11,6 +11,7 @@ struct AlarmFormView: View {
  @ObservedObject var detailVM: AlarmDetailViewModel
  @State private var isAddingChallenge = false
  @State private var showQRScanner = false
+ @State private var isTestingSoundNotification = false
  let onSave: () -> Void
 
  var body: some View {
@@ -33,6 +34,68 @@ struct AlarmFormView: View {
              isOn: detailVM.repeatBinding(for: day)
            )
          }
+       }
+       
+       Section(header: Text("Sound")) {
+         // Sound Picker
+         Picker("Sound", selection: detailVM.soundNameBinding) {
+           ForEach(DependencyContainer.shared.audioService.listAvailableSounds(), id: \.name) { sound in
+             Text(sound.displayName).tag(sound.name)
+           }
+         }
+         .pickerStyle(.menu)
+         
+         // Preview Button
+         Button(action: previewCurrentSound) {
+           HStack {
+             Image(systemName: "play.circle")
+             Text("Preview Sound")
+             Spacer()
+           }
+         }
+         .buttonStyle(.plain)
+         .foregroundColor(.accentColor)
+         
+         // Volume Slider
+         VStack(alignment: .leading, spacing: 8) {
+           Text("In-app ring volume (doesn't affect lock-screen)")
+             .font(.caption)
+             .foregroundColor(.secondary)
+           
+           HStack {
+             Image(systemName: "speaker.fill")
+               .foregroundColor(.secondary)
+               .font(.caption)
+             
+             Slider(value: detailVM.volumeBinding, in: 0.0...1.0, step: 0.1)
+             
+             Image(systemName: "speaker.wave.3.fill")
+               .foregroundColor(.secondary)
+               .font(.caption)
+           }
+           
+           Text("Volume: \(Int(detailVM.draft.volume * 100))%")
+             .font(.caption2)
+             .foregroundColor(.secondary)
+         }
+         
+         // Test Notification Button
+         Button(action: testSoundNotification) {
+           HStack {
+             if isTestingSoundNotification {
+               ProgressView()
+                 .scaleEffect(0.8)
+               Text("Test notification sent...")
+             } else {
+               Image(systemName: "bell.badge")
+               Text("Test Sound Notification")
+             }
+             Spacer()
+           }
+         }
+         .buttonStyle(.plain)
+         .foregroundColor(isTestingSoundNotification ? .secondary : .accentColor)
+         .disabled(isTestingSoundNotification)
        }
 
        Section(header: Text("Challenges")) {
@@ -101,7 +164,41 @@ struct AlarmFormView: View {
          )
      }
    }
+   
+
  }
+  // MARK: - Sound Functions
+
+  private func previewCurrentSound() {
+    Task {
+      await DependencyContainer.shared.audioService.preview(
+        soundName: detailVM.draft.soundName,
+        volume: detailVM.draft.volume
+      )
+    }
+  }
+
+  private func testSoundNotification() {
+    Task {
+      isTestingSoundNotification = true
+      defer {
+        Task { @MainActor in
+          // Reset after 3 seconds
+          try? await Task.sleep(nanoseconds: 3_000_000_000)
+          isTestingSoundNotification = false
+        }
+      }
+
+      do {
+        try await DependencyContainer.shared.notificationService.scheduleTestNotification(
+          soundName: detailVM.draft.soundName,
+          in: 5.0
+        )
+      } catch {
+        print("Failed to schedule test notification: \(error)")
+      }
+    }
+  }
 }
 
 struct ChallengeRow: View {

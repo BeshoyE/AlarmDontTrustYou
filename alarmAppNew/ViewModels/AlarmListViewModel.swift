@@ -67,6 +67,13 @@ class AlarmListViewModel: ObservableObject {
 
   func toggle(_ alarm:Alarm) {
     guard let thisAlarm = alarms.firstIndex(where: {$0.id == alarm.id}) else { return }
+    
+    // Data model guardrail: Don't allow enabling alarms without expectedQR (QR-only MVP)
+    if !alarm.isEnabled && alarm.expectedQR == nil {
+      errorMessage = "Cannot enable alarm: QR code required for dismissal"
+      return
+    }
+    
     alarms[thisAlarm].isEnabled.toggle()
     Task {
       await sync(alarms[thisAlarm])
@@ -99,6 +106,14 @@ class AlarmListViewModel: ObservableObject {
       
       // Schedule if enabled
       if alarm.isEnabled {
+        // Data model guardrail: Don't schedule alarms without expectedQR (QR-only MVP)
+        guard alarm.expectedQR != nil else {
+          await MainActor.run {
+            self.errorMessage = "Cannot schedule alarm: QR code required for dismissal"
+          }
+          return
+        }
+        
         // Check permissions before scheduling
         let permissionDetails = await permissionService.checkNotificationPermission()
         

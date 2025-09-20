@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import UserNotifications
 
 struct AlarmsListView: View {
 
@@ -94,9 +95,55 @@ struct AlarmsListView: View {
       }
       .navigationTitle("Alarms")
       .toolbar {
-          ToolbarItem(placement: .navigationBarTrailing) {
-              DebugNotifButton()
+        ToolbarItem(placement: .navigationBarTrailing) {
+          Menu {
+            Button("Request Notification Permission", systemImage: "bell.badge") {
+              Task {
+                let center = UNUserNotificationCenter.current()
+                do {
+                  let granted = try await center.requestAuthorization(options: [.alert, .sound, .badge])
+                  print("🔔 requestAuthorization returned: \(granted)")
+                  let settings = await center.notificationSettings()
+                  print("🔧 auth=\(settings.authorizationStatus.rawValue) alert=\(settings.alertSetting.rawValue) sound=\(settings.soundSetting.rawValue)")
+                } catch {
+                  print("❌ requestAuthorization error: \(error)")
+                }
+              }
+            }
+
+            Button("Test Lock Screen Notification", systemImage: "lock.circle") {
+              Task {
+                try? await DependencyContainer.shared.notificationService.scheduleTestSystemDefault()
+              }
+            }
+
+            Button("Run Sound Triage", systemImage: "stethoscope") {
+              Task {
+                try? await DependencyContainer.shared.notificationService.runCompleteSoundTriage()
+              }
+            }
+
+            Button("Bare Default Test", systemImage: "exclamationmark.triangle") {
+              Task {
+                try? await DependencyContainer.shared.notificationService.scheduleBareDefaultTest()
+              }
+            }
+
+            Button("Bare Test (No Interruption)", systemImage: "bell.slash") {
+              Task {
+                try? await DependencyContainer.shared.notificationService.scheduleBareDefaultTestNoInterruption()
+              }
+            }
+
+            Button("Bare Test (No Category)", systemImage: "bell.badge") {
+              Task {
+                try? await DependencyContainer.shared.notificationService.scheduleBareDefaultTestNoCategory()
+              }
+            }
+          } label: {
+            Image(systemName: "wrench.and.screwdriver")
           }
+        }
       }
       .task {
           vm.refreshPermission()
@@ -183,23 +230,18 @@ struct AlarmRowView: View {
 }
 
 #Preview {
-  let mockPermissionService = PermissionService()
-  let mockNotificationService = NotificationService(permissionService: mockPermissionService)
-  let mockStorage = PersistenceService()
-  
-  let previewVM = AlarmListViewModel(
-    storage: mockStorage,
-    permissionService: mockPermissionService,
-    notificationService: mockNotificationService
-  )
-  
-  previewVM.alarms = [
-    Alarm(id: UUID(), time: Date(), label: "Morning", repeatDays: [.monday], challengeKind: [], isEnabled: true),
-    Alarm(id: UUID(), time: Date(), label: "Work", repeatDays: [], challengeKind: [.math], isEnabled: true),
-    Alarm(id: UUID(), time: Date(), label: "Weekend", repeatDays: [.saturday, .sunday], challengeKind: [], isEnabled: false)
-  ]
+    AlarmsListView(preConfiguredVM: {
+        let container = DependencyContainer.shared
+        let vm = container.makeAlarmListViewModel()
 
-  return AlarmsListView(preConfiguredVM: previewVM)
+        vm.alarms = [
+            Alarm(id: UUID(), time: Date(), label: "Morning", repeatDays: [.monday], challengeKind: [], isEnabled: true, volume: 0.5),
+            Alarm(id: UUID(), time: Date(), label: "Work", repeatDays: [], challengeKind: [.math], isEnabled: true, volume: 0.7),
+            Alarm(id: UUID(), time: Date(), label: "Weekend", repeatDays: [.saturday, .sunday], challengeKind: [], isEnabled: false, volume: 0.8)
+        ]
+
+        return vm
+    }())
     .environmentObject(AppRouter())
 }
 

@@ -1,9 +1,17 @@
 {
   "permissions": {
     "allow": [
-      "mcp__ide__getDiagnostics"
+      "mcp__ide__getDiagnostics",
+      "Read(//var/folders/2z/sz_w33_560x_7wj1qbyd_lbr0000gn/T/TemporaryItems/NSIRD_screencaptureui_xgeRKK/**)",
+      "Read(//var/folders/2z/sz_w33_560x_7wj1qbyd_lbr0000gn/T/TemporaryItems/NSIRD_screencaptureui_8BmNnE/**)",
+      "Read(//var/folders/2z/sz_w33_560x_7wj1qbyd_lbr0000gn/T/TemporaryItems/NSIRD_screencaptureui_GLfe8Y/**)",
+      "Bash(xcodebuild:*)",
+      "Read(//var/folders/2z/sz_w33_560x_7wj1qbyd_lbr0000gn/T/TemporaryItems/NSIRD_screencaptureui_T65aVs/**)",
+      "Read(//var/folders/2z/sz_w33_560x_7wj1qbyd_lbr0000gn/T/TemporaryItems/NSIRD_screencaptureui_l445a4/**)",
+      "Read(//var/folders/2z/sz_w33_560x_7wj1qbyd_lbr0000gn/T/TemporaryItems/NSIRD_screencaptureui_3uncQv/**)"
     ],
     "deny": [],
     "ask": []
-  }
+  },
+  "outputStyle": "Explanatory"
 }

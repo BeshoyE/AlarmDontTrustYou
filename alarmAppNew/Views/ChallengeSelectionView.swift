@@ -87,7 +87,8 @@ struct ChallengeSelectionView: View {
             repeatDays: [],
             challengeKind: [.math],  // Pre-populate with a challenge to see checkmark
             expectedQR: nil,
-            isEnabled: true
+            isEnabled: true,
+            volume: 2.0
         ))
     )
 }

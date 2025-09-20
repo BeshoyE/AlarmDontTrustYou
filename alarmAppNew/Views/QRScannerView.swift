@@ -7,6 +7,8 @@
 
 import SwiftUI
 import CodeScanner
+import AVFoundation
+
 
 struct QRScannerView: View {
   @Environment(\.dismiss) private var dismiss
@@ -16,6 +18,7 @@ struct QRScannerView: View {
   
   @State private var cameraPermissionStatus: PermissionStatus = .notDetermined
   @State private var showPermissionBlocking = false
+  @State private var isTorchOn = false
 
   var body: some View {
     NavigationStack {
@@ -23,8 +26,12 @@ struct QRScannerView: View {
         if cameraPermissionStatus == .authorized {
           CodeScannerView(
             codeTypes: [.qr],
+            simulatedData: "Test QR Data",
             completion: handleScan
           )
+          .onChange(of: isTorchOn) { _, newValue in
+            setTorch(newValue)
+          }
         } else if cameraPermissionStatus == .denied {
           CameraPermissionBlockingView(
             permissionService: permissionService,
@@ -49,6 +56,15 @@ struct QRScannerView: View {
               onCancel()
               dismiss()
             }
+          }
+          
+          ToolbarItem(placement: .primaryAction) {
+            Button(action: { isTorchOn.toggle() }) {
+              Image(systemName: isTorchOn ? "flashlight.on.fill" : "flashlight.off.fill")
+                .foregroundColor(isTorchOn ? .yellow : .primary)
+            }
+            .accessibilityLabel("Toggle Torch")
+            .accessibilityHint("Toggles the camera flash to help scan QR codes in dark environments")
           }
         }
       }
@@ -77,13 +93,33 @@ struct QRScannerView: View {
   private func handleScan(result: Result<ScanResult, ScanError>) {
     switch result {
     case .success(let scan):
-      onScanned(scan.string)
-      dismiss()
+      onScanned(scan.string)   // no dismiss() here
     case .failure:
-      onCancel()
-      dismiss()
+      onCancel()               // no dismiss() here
     }
   }
+
+  private func setTorch(_ on: Bool) {
+      #if targetEnvironment(simulator)
+      return // no torch in simulator
+      #else
+      guard let device = AVCaptureDevice.default(for: .video),
+            device.hasTorch else { return }
+      do {
+          try device.lockForConfiguration()
+          if on {
+              try device.setTorchModeOn(level: AVCaptureDevice.maxAvailableTorchLevel)
+          } else {
+              device.torchMode = .off
+          }
+          device.unlockForConfiguration()
+      } catch {
+          print("Torch could not be used: \(error)")
+      }
+      #endif
+  }
+
+
 }
 
 

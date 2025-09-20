@@ -9,9 +9,11 @@ struct ContentView: View {
         case .alarmList:
             AlarmsListView()
         case .dismissal(let id):
-            // If/when you wire the VM, pass it here:
-            // DismissalFlowView(viewModel: .init(alarmID: id), onFinish: { router.backToList() })
+            // Legacy stub route - can be removed after migration
             DismissalFlowView(alarmID: id, onFinish: { router.backToList() })
+        case .ringing(let id):
+            RingingView(alarmID: id)
+                .interactiveDismissDisabled(true)
         }
     }
 }

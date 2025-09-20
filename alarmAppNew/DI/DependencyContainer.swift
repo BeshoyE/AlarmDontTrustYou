@@ -10,20 +10,71 @@
 // NSUserNotificationUsageDescription: "This app needs notification permission to deliver reliable alarm notifications that will wake you up at the scheduled time."
 
 import Foundation
+import UserNotifications
 
 @MainActor
 class DependencyContainer: ObservableObject {
     static let shared = DependencyContainer()
-    
+
     // MARK: - Services
     let permissionService: PermissionServiceProtocol
     let persistenceService: AlarmStorage
-    let notificationService: NotificationScheduling
-    
+    private let appStateProvider: AppStateProviding
+    private let appLifecycleTracker: AppLifecycleTracking
+    private let notificationServiceConcrete: NotificationService  // Strong concrete retention
+    let qrScanningService: QRScanning
+    let audioService: AudioServiceProtocol
+    let appRouter: AppRouter
+    let reliabilityLogger: ReliabilityLogging
+
+    // Public protocol exposure
+    var notificationService: NotificationScheduling { notificationServiceConcrete }
+
+    private var didActivateNotifications = false
+
     private init() {
         self.permissionService = PermissionService()
         self.persistenceService = PersistenceService()
-        self.notificationService = NotificationService(permissionService: permissionService)
+        self.reliabilityLogger = LocalReliabilityLogger()
+        self.appStateProvider = AppStateProvider()
+        self.appLifecycleTracker = AppLifecycleTracker()
+        self.appRouter = AppRouter()
+        self.notificationServiceConcrete = NotificationService(
+            permissionService: permissionService,
+            appStateProvider: appStateProvider,
+            reliabilityLogger: reliabilityLogger,
+            appRouter: appRouter,
+            persistenceService: persistenceService
+        )
+        self.qrScanningService = QRScanningService(permissionService: permissionService)
+        self.audioService = AudioService()
+    }
+
+    // MARK: - Activation
+
+    @MainActor
+    func activateNotificationDelegate() {
+        guard !didActivateNotifications else { return }
+
+        // Start lifecycle tracking first
+        appLifecycleTracker.startTracking()
+
+        // Set up notification delegate and categories
+        UNUserNotificationCenter.current().delegate = notificationServiceConcrete
+        notificationServiceConcrete.ensureNotificationCategoriesRegistered()
+
+        didActivateNotifications = true
+        print("🔄 DependencyContainer: Activated notification delegate and lifecycle tracking")
+    }
+
+    /// Activate observability systems (logging, metrics, etc.)
+    /// Call this once at app start - idempotent and separate from notifications
+    func activateObservability() {
+        // Activate reliability logger with proper file protection for lock screen access
+        if let logger = reliabilityLogger as? LocalReliabilityLogger {
+            logger.activate()
+        }
+        print("🔄 DependencyContainer: Activated observability systems")
     }
     
     // MARK: - ViewModels
@@ -40,7 +91,16 @@ class DependencyContainer: ObservableObject {
         return AlarmDetailViewModel(alarm: targetAlarm, isNew: alarm == nil)
     }
     
-    func makeDismissalFlowViewModel(alarmID: UUID) -> DismissalFlowViewModel {
-        return DismissalFlowViewModel(alarmID: alarmID, permissionService: permissionService)
+    func makeDismissalFlowViewModel() -> DismissalFlowViewModel {
+        return DismissalFlowViewModel(
+            qrScanning: qrScanningService,
+            notificationService: notificationService,
+            alarmStorage: persistenceService,
+            clock: SystemClock(),
+            appRouter: appRouter,
+            permissionService: permissionService,
+            reliabilityLogger: reliabilityLogger,
+            audioService: audioService
+        )
     }
 }

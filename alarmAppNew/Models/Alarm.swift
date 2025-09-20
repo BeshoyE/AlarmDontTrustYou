@@ -17,6 +17,8 @@ struct Alarm: Codable, Equatable, Hashable, Identifiable {
   var stepThreshold: Int?
   var mathChallenge: MathChallenge?
   var isEnabled: Bool
+  var soundName: String?  // Sound file name for notifications and ringing
+  var volume: Double      // Volume for in-app ringing and previews only (0.0-1.0)
 }
 
 extension Alarm {
@@ -26,7 +28,9 @@ extension Alarm {
           label: "blank",
           repeatDays: [],
           challengeKind: [],
-          isEnabled: true)
+          isEnabled: true,
+          soundName: "default",
+          volume: 0.8)
   }
 
   // Add this computed property for display purposes

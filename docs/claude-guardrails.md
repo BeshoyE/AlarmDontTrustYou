@@ -1,5 +1,4 @@
-
-# Guardrails 
+# Guardrails
 
 * **No side effects in initializers.** Constructors must not do I/O, talk to OS APIs, or assert/`fatalError`.
 * **OS work only in explicit activation methods.** E.g., notification delegate wiring + category registration live in `DependencyContainer.activate…()` (idempotent) and are called from App startup.
@@ -9,6 +8,7 @@
 * **Idempotency by design.** All setup/registration functions are safe to call multiple times (no duplicates, no side effects).
 * **No singletons in methods.** Never reach into `DependencyContainer.shared` from within services—use injected deps only.
 * **Structured logging contract.** Every observable event logs `{ alarmId, event, source/action, category, occurrenceKey? }`.
+* **Critical Blocker / Reliability.** Do not design alarms where continuous sound depends solely on app-run audio sessions. Local notifications must remain the guaranteed sound path.
 
 # Boilerplate you can require Claude to keep using
 
@@ -91,9 +91,6 @@ Ask Claude to include these in DoD for each stage:
 * **Logger shape helper:** Provide a tiny helper to enforce consistent fields for notification logs.
 
 If you paste these sections into future Claude commands (Guardrails + DoD add-ons + boilerplate), you’ll keep the initializer purity, activation pattern, and receive-side validation intact as the app grows.
-
-
-
 
 UIKit Isolation Guardrails (paste into every command)
 

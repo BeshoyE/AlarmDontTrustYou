@@ -91,7 +91,8 @@ final class AudioServiceTests: XCTestCase {
 
         let audioSession = AVAudioSession.sharedInstance()
         XCTAssertEqual(audioSession.category, .playback)
-        XCTAssertTrue(audioSession.categoryOptions.contains(.duckOthers))
+        XCTAssertFalse(audioSession.categoryOptions.contains(.duckOthers))
+        XCTAssertTrue(audioSession.categoryOptions.contains(.defaultToSpeaker))
     }
 
     func test_activatePlaybackSession_calledTwice_shouldNotThrow() async throws {

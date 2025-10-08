@@ -63,7 +63,9 @@ class AudioService: NSObject, AudioServiceProtocol {
         guard !isSessionActive else { return }
 
         let audioSession = AVAudioSession.sharedInstance()
-        try audioSession.setCategory(.playback, options: [.duckOthers])
+        // Use .playback without .defaultToSpeaker (not compatible)
+        // The system will route to speaker by default for alarm sounds
+        try audioSession.setCategory(.playback, options: [])
         try audioSession.setActive(true)
         isSessionActive = true
 

@@ -9,6 +9,7 @@
 
 import SwiftUI
 import Combine
+import AVFoundation
 
 @MainActor
 final class DismissalFlowViewModel: ObservableObject {
@@ -64,15 +65,20 @@ final class DismissalFlowViewModel: ObservableObject {
     private let notificationService: NotificationScheduling
     private let alarmStorage: AlarmStorage
     private let clock: Clock
-    private let appRouter: AppRouter
+    private let appRouter: AppRouting
     private let permissionService: PermissionServiceProtocol
     private let reliabilityLogger: ReliabilityLogging
     private let audioService: AudioServiceProtocol
+    private let audioEngine: AlarmAudioEngineProtocol
+    private let reliabilityModeProvider: ReliabilityModeProvider
+    private let dismissedRegistry: DismissedRegistry
+    private let settingsService: SettingsServiceProtocol
     
     // MARK: - Private State
-    
+
     private var alarmSnapshot: Alarm?
     private var currentAlarmRun: AlarmRun?
+    private var occurrenceKey: String?  // ISO8601 formatted fireDate for occurrence-scoped cancellation
     private var scanTask: Task<Void, Never>?
     private var lastSuccessPayload: String?
     private var lastSuccessTime: Date?
@@ -97,10 +103,14 @@ final class DismissalFlowViewModel: ObservableObject {
         notificationService: NotificationScheduling,
         alarmStorage: AlarmStorage,
         clock: Clock,
-        appRouter: AppRouter,
+        appRouter: AppRouting,
         permissionService: PermissionServiceProtocol,
         reliabilityLogger: ReliabilityLogging,
-        audioService: AudioServiceProtocol
+        audioService: AudioServiceProtocol,
+        audioEngine: AlarmAudioEngineProtocol,
+        reliabilityModeProvider: ReliabilityModeProvider,
+        dismissedRegistry: DismissedRegistry,
+        settingsService: SettingsServiceProtocol
     ) {
         self.qrScanning = qrScanning
         self.notificationService = notificationService
@@ -110,6 +120,10 @@ final class DismissalFlowViewModel: ObservableObject {
         self.permissionService = permissionService
         self.reliabilityLogger = reliabilityLogger
         self.audioService = audioService
+        self.audioEngine = audioEngine
+        self.reliabilityModeProvider = reliabilityModeProvider
+        self.dismissedRegistry = dismissedRegistry
+        self.settingsService = settingsService
     }
     
     // MARK: - Public Intents (All Idempotent)
@@ -124,13 +138,17 @@ final class DismissalFlowViewModel: ObservableObject {
             alarmSnapshot = alarm
             
             // Create run record
+            let firedAt = clock.now()
             currentAlarmRun = AlarmRun(
                 id: UUID(),
                 alarmId: alarmId,
-                firedAt: clock.now(),
+                firedAt: firedAt,
                 dismissedAt: nil as Date?,
                 outcome: .failed // Default to fail; only change on explicit success
             )
+
+            // Generate occurrence key for occurrence-scoped cancellation
+            occurrenceKey = OccurrenceKeyFormatter.key(from: firedAt)
             
             // Transition to ringing
             setState(.ringing)
@@ -140,13 +158,62 @@ final class DismissalFlowViewModel: ObservableObject {
             onRequestScreenAwake?(true)
             onRequestHaptics?()
 
-            // Start alarm sound
-            Task {
-                await audioService.startRinging(
-                    soundName: alarm.soundName,
-                    volume: alarm.volume,
-                    loop: true
-                )
+            // Start alarm sound - check reliability mode first
+            let currentMode = reliabilityModeProvider.currentMode
+            print("DismissalFlow: Starting alarm with reliability mode: \(currentMode.rawValue)")
+
+            // Check if we should play sound based on suppressForegroundSound setting
+            let isAppActive = UIApplication.shared.applicationState == .active
+            let shouldPlaySound = !settingsService.suppressForegroundSound || !isAppActive
+
+            if !shouldPlaySound {
+                print("DismissalFlow: Suppressing foreground sound (setting enabled and app is active)")
+            }
+
+            if currentMode == .notificationsPlusAudio && shouldPlaySound {
+                // Enhanced mode: use background audio engine + notifications
+                do {
+                    let soundName = alarm.soundName ?? "ringtone1"
+
+                    // Check current engine state and use appropriate method
+                    switch audioEngine.currentState {
+                    case .prewarming:
+                        // Prewarm is active - promote to ringing
+                        try audioEngine.promoteToRinging()
+                        print("DismissalFlow: Enhanced mode - promoted prewarm to ringing")
+
+                    case .idle:
+                        // No prewarm - start foreground alarm playback
+                        try audioEngine.playForegroundAlarm(soundName: soundName)
+                        print("DismissalFlow: Enhanced mode - started foreground alarm playback")
+
+                    case .ringing:
+                        // Already ringing - ignore (idempotent)
+                        print("DismissalFlow: Enhanced mode - already ringing, ignoring start request")
+                    }
+                } catch {
+                    print("DismissalFlow: Enhanced mode failed, falling back to audioService: \(error)")
+                    // Fallback to audioService if audioEngine fails
+                    if shouldPlaySound {
+                        Task {
+                            await audioService.startRinging(
+                                soundName: alarm.soundName,
+                                volume: alarm.volume,
+                                loop: true
+                            )
+                        }
+                    }
+                }
+            } else if shouldPlaySound {
+                // Standard mode: notifications-only (App Store safe)
+                print("DismissalFlow: Standard mode - using audioService only (no background audio engine)")
+                Task {
+                    await audioService.startRinging(
+                        soundName: alarm.soundName,
+                        volume: alarm.volume,
+                        loop: true
+                    )
+                }
             }
             
         } catch {
@@ -207,14 +274,14 @@ final class DismissalFlowViewModel: ObservableObject {
         }
     }
     
-    func didScan(payload: String) {
+    func didScan(payload: String) async {
         // Called by scanner stream - handle state transitions
         print("DismissalFlowViewModel: didScan called with payload: \(payload.prefix(20))... (length: \(payload.count))")
-        
+
         // Atomic guard: prevent processing if transitioning
-        guard !isTransitioning else { 
+        guard !isTransitioning else {
             print("DismissalFlowViewModel: Ignoring scan - currently transitioning")
-            return 
+            return
         }
         
         guard state == .scanning else { 
@@ -240,7 +307,7 @@ final class DismissalFlowViewModel: ObservableObject {
             if shouldProcessSuccessPayload(payload) {
                 print("DismissalFlowViewModel: QR code match successful for alarm: \(alarm.id)")
                 reliabilityLogger.logDismissSuccess(alarm.id, method: "qr", details: ["payload_length": "\(trimmedPayload.count)"])
-                completeSuccess()
+                await completeSuccess()
             } else {
                 // Duplicate within debounce window - return to scanning (with atomic guard)
                 print("DismissalFlowViewModel: Duplicate QR scan ignored (debounce)")
@@ -281,11 +348,11 @@ final class DismissalFlowViewModel: ObservableObject {
         setState(.ringing)
     }
     
-    func completeSuccess() {
+    func completeSuccess() async {
         // Atomic transition guard: prevent concurrent completion
         guard !isTransitioning else { return }
         isTransitioning = true
-        
+
         // Idempotent: only complete once
         guard !hasCompletedSuccess else {
             isTransitioning = false
@@ -295,25 +362,54 @@ final class DismissalFlowViewModel: ObservableObject {
             isTransitioning = false
             return
         }
-        
+
         hasCompletedSuccess = true
-        
+
         // Stop UI effects immediately
         onRequestScreenAwake?(false)
         isScreenAwake = false
 
         // Stop alarm sound
+        audioEngine.stop()
         audioService.stopAndDeactivateSession()
+
+        // Grace period to ensure audio session fully deactivates before next notification can fire
+        try? await Task.sleep(nanoseconds: AudioSessionConfig.deactivationGraceNs)
 
         // Stop scanner
         stopScanTask()
 
-        // Cancel all pending notifications for this alarm
-        notificationService.cancelSpecificNotifications(
-            for: alarm.id,
-            types: [.nudge1, .nudge2, .nudge3]
-        )
-        
+        // CHUNK 3: Crash-resilient dismissal order
+        // 1. Mark dismissed FIRST (guards future notification taps if crash occurs)
+        if let key = occurrenceKey {
+            await dismissedRegistry.markDismissed(alarmId: alarm.id, occurrenceKey: key)
+            print("📋 DismissalFlow: Marked occurrence \(key.prefix(10))... as dismissed")
+        }
+
+        // 2. THEN clean up notifications (async OS call - safe to fail after marking)
+        // For one-time alarms: cancel all notifications and disable
+        // For repeating alarms: clean up only this occurrence's notifications
+        if alarm.repeatDays.isEmpty {
+            // One-time alarm: cancel all notifications
+            await notificationService.cancelAlarm(alarm)
+
+            // Disable the alarm so it doesn't get rescheduled
+            var updatedAlarm = alarm
+            updatedAlarm.isEnabled = false
+            try? alarmStorage.saveAlarms([updatedAlarm])
+            print("DismissalFlow: One-time alarm dismissed and disabled")
+        } else {
+            // Repeating alarm: clean up only this occurrence (removes pending + delivered)
+            if let key = occurrenceKey {
+                await notificationService.cleanupAfterDismiss(alarmId: alarm.id, occurrenceKey: key)
+                print("DismissalFlow: Repeating alarm - cleaned up occurrence \(key.prefix(10))..., keeping future occurrences")
+            } else {
+                // Fallback: cancel all if occurrenceKey missing (shouldn't happen)
+                print("⚠️ DismissalFlow: Missing occurrenceKey, falling back to full cancel")
+                await notificationService.cancelAlarm(alarm)
+            }
+        }
+
         // Complete alarm run with success
         if var run = currentAlarmRun {
             run.dismissedAt = clock.now()
@@ -327,6 +423,8 @@ final class DismissalFlowViewModel: ObservableObject {
             }
         }
         
+        // Background audio stopped via audioEngine.stop() above
+
         // Transition to success
         setState(.success)
         isTransitioning = false
@@ -354,7 +452,10 @@ final class DismissalFlowViewModel: ObservableObject {
         isScreenAwake = false
 
         // Stop alarm sound
+        audioEngine.stop()
         audioService.stopAndDeactivateSession()
+
+        // Background audio stopped via audioEngine.stop() above
 
         // Stop scanner
         stopScanTask()
@@ -386,6 +487,7 @@ final class DismissalFlowViewModel: ObservableObject {
         isScreenAwake = false
 
         // Stop alarm sound
+        audioEngine.stop()
         audioService.stopAndDeactivateSession()
 
         // Stop scanner
@@ -433,9 +535,7 @@ final class DismissalFlowViewModel: ObservableObject {
         scanTask = Task {
             do {
                 for await payload in qrScanning.scanResultStream() {
-                    await MainActor.run {
-                        didScan(payload: payload)
-                    }
+                    await didScan(payload: payload)
                 }
             } catch {
                 await MainActor.run {
@@ -476,6 +576,7 @@ final class DismissalFlowViewModel: ObservableObject {
     scanFeedbackMessage = nil
 
     // Stop alarm sound
+    audioEngine.stop()
     audioService.stopAndDeactivateSession()
   }
 
@@ -493,12 +594,14 @@ protocol QRScanning {
     func scanResultStream() -> AsyncStream<String>
 }
 
-protocol Clock {
+public protocol Clock {
     func now() -> Date
 }
 
-struct SystemClock: Clock {
-    func now() -> Date {
+public struct SystemClock: Clock {
+    public init() {}
+
+    public func now() -> Date {
         Date()
     }
 }

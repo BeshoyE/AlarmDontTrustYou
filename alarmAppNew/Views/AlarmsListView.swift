@@ -14,6 +14,7 @@ struct AlarmsListView: View {
   @EnvironmentObject private var router: AppRouter
   @StateObject private var vm: AlarmListViewModel
   @State private var detailVM: AlarmDetailViewModel?
+  @State private var showSettings = false
 
   init() {
         _vm = StateObject(wrappedValue: DependencyContainer.shared.makeAlarmListViewModel())
@@ -52,7 +53,7 @@ struct AlarmsListView: View {
             AlarmRowView(
               alarm: alarm,
               onToggle: { vm.toggle(alarm) },
-              onTap: { router.showDismissal(for: alarm.id) }
+              onTap: { detailVM = AlarmDetailViewModel(alarm: alarm, isNew: false) }
             )
             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
               Button(role: .destructive) {
@@ -78,7 +79,7 @@ struct AlarmsListView: View {
           HStack {
             Spacer()
             Button {
-              detailVM = AlarmDetailViewModel(alarm: .blank, isNew: true)
+              detailVM = DependencyContainer.shared.makeAlarmDetailViewModel()
             } label: {
               Image(systemName: "plus")
                 .font(.title2)
@@ -140,6 +141,12 @@ struct AlarmsListView: View {
                 try? await DependencyContainer.shared.notificationService.scheduleBareDefaultTestNoCategory()
               }
             }
+
+            Divider()
+
+            Button("Settings", systemImage: "gear") {
+              showSettings = true
+            }
           } label: {
             Image(systemName: "wrench.and.screwdriver")
           }
@@ -181,6 +188,9 @@ struct AlarmsListView: View {
                     router.showDismissal(for: id)
                 }
             }
+    .sheet(isPresented: $showSettings) {
+      SettingsView()
+    }
   }
 }
 
@@ -235,9 +245,9 @@ struct AlarmRowView: View {
         let vm = container.makeAlarmListViewModel()
 
         vm.alarms = [
-            Alarm(id: UUID(), time: Date(), label: "Morning", repeatDays: [.monday], challengeKind: [], isEnabled: true, volume: 0.5),
-            Alarm(id: UUID(), time: Date(), label: "Work", repeatDays: [], challengeKind: [.math], isEnabled: true, volume: 0.7),
-            Alarm(id: UUID(), time: Date(), label: "Weekend", repeatDays: [.saturday, .sunday], challengeKind: [], isEnabled: false, volume: 0.8)
+            Alarm(id: UUID(), time: Date(), label: "Morning", repeatDays: [.monday], challengeKind: [], isEnabled: true, soundId: "chimes01", volume: 0.5),
+            Alarm(id: UUID(), time: Date(), label: "Work", repeatDays: [], challengeKind: [.math], isEnabled: true, soundId: "bells01", volume: 0.7),
+            Alarm(id: UUID(), time: Date(), label: "Weekend", repeatDays: [.saturday, .sunday], challengeKind: [], isEnabled: false, soundId: "tone01", volume: 0.8)
         ]
 
         return vm

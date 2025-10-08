@@ -11,6 +11,7 @@
 
 import Foundation
 import UserNotifications
+import UIKit
 
 @MainActor
 class DependencyContainer: ObservableObject {
@@ -26,28 +27,100 @@ class DependencyContainer: ObservableObject {
     let audioService: AudioServiceProtocol
     let appRouter: AppRouter
     let reliabilityLogger: ReliabilityLogging
+    private let soundEngineConcrete: AlarmSoundEngine
+    let settingsServiceConcrete: SettingsService
+
+    // MARK: - New Sound System Services
+    private let soundCatalogConcrete: SoundCatalog
+    private let alarmFactoryConcrete: DefaultAlarmFactory
+
+    // MARK: - Notification Chaining Services
+    private let chainSettingsProviderConcrete: DefaultChainSettingsProvider
+    private let notificationIndexConcrete: NotificationIndex
+    private let chainPolicyConcrete: ChainPolicy
+    private let globalLimitGuardConcrete: GlobalLimitGuard
+    private let chainedNotificationSchedulerConcrete: ChainedNotificationScheduler
+    private let dismissedRegistryConcrete: DismissedRegistry
+    private let refreshCoordinatorConcrete: RefreshCoordinator
 
     // Public protocol exposure
     var notificationService: NotificationScheduling { notificationServiceConcrete }
+    var refreshCoordinator: RefreshCoordinator { refreshCoordinatorConcrete }
+    var audioEngine: AlarmAudioEngineProtocol { soundEngineConcrete }
+    var settingsService: SettingsServiceProtocol { settingsServiceConcrete }
+    var soundCatalog: SoundCatalogProviding { soundCatalogConcrete }
+    var alarmFactory: AlarmFactory { alarmFactoryConcrete }
+    var chainedNotificationScheduler: ChainedNotificationScheduling { chainedNotificationSchedulerConcrete }
+    var chainSettingsProvider: ChainSettingsProviding { chainSettingsProviderConcrete }
 
     private var didActivateNotifications = false
 
     private init() {
+        // CRITICAL INITIALIZATION ORDER: Prevent dependency cycles
+
+        // 1. Create SoundCatalog first (no dependencies)
+        self.soundCatalogConcrete = SoundCatalog()
+
+        // 2. Create basic services
         self.permissionService = PermissionService()
-        self.persistenceService = PersistenceService()
         self.reliabilityLogger = LocalReliabilityLogger()
         self.appStateProvider = AppStateProvider()
         self.appLifecycleTracker = AppLifecycleTracker()
         self.appRouter = AppRouter()
+
+        // 3. Create PersistenceService (will need sound catalog for repairs in future)
+        self.persistenceService = PersistenceService()
+
+        // 4. Create AlarmFactory with sound catalog
+        self.alarmFactoryConcrete = DefaultAlarmFactory(catalog: soundCatalogConcrete)
+
+        // 5. Create notification chaining services
+        self.chainSettingsProviderConcrete = DefaultChainSettingsProvider()
+        let chainSettings = chainSettingsProviderConcrete.chainSettings()
+
+        // Validate settings during initialization (fail fast)
+        let validationResult = chainSettingsProviderConcrete.validateSettings(chainSettings)
+        assert(validationResult.isValid, "Invalid chain settings: \(validationResult.errorReasons.joined(separator: ", "))")
+
+        self.notificationIndexConcrete = NotificationIndex()
+        self.chainPolicyConcrete = ChainPolicy(settings: chainSettings)
+        self.globalLimitGuardConcrete = GlobalLimitGuard()
+        self.dismissedRegistryConcrete = DismissedRegistry()
+        self.chainedNotificationSchedulerConcrete = ChainedNotificationScheduler(
+            soundCatalog: soundCatalogConcrete,
+            notificationIndex: notificationIndexConcrete,
+            chainPolicy: chainPolicyConcrete,
+            globalLimitGuard: globalLimitGuardConcrete
+        )
+
+        // 6. Create audio and settings services (needed by NotificationService)
+        self.soundEngineConcrete = AlarmSoundEngine.shared
+        self.settingsServiceConcrete = SettingsService(audioEngine: soundEngineConcrete)
+        soundEngineConcrete.setReliabilityModeProvider(settingsServiceConcrete)
+
+        // 7. Create remaining services (now with all dependencies available)
         self.notificationServiceConcrete = NotificationService(
             permissionService: permissionService,
             appStateProvider: appStateProvider,
             reliabilityLogger: reliabilityLogger,
             appRouter: appRouter,
-            persistenceService: persistenceService
+            persistenceService: persistenceService,
+            chainedScheduler: chainedNotificationSchedulerConcrete,
+            settingsService: settingsServiceConcrete,
+            audioEngine: soundEngineConcrete,
+            dismissedRegistry: dismissedRegistryConcrete,
+            chainSettingsProvider: chainSettingsProviderConcrete
         )
         self.qrScanningService = QRScanningService(permissionService: permissionService)
         self.audioService = AudioService()
+
+        // 8. Create RefreshCoordinator to coalesce refresh requests
+        self.refreshCoordinatorConcrete = RefreshCoordinator(notificationService: notificationServiceConcrete)
+
+        // 9. Set up policy provider after all services are initialized
+        soundEngineConcrete.setPolicyProvider { [weak self] in
+            self?.settingsServiceConcrete.audioPolicy ?? AudioPolicy(capability: .foregroundAssist, allowRouteOverrideAtAlarm: true)
+        }
     }
 
     // MARK: - Activation
@@ -63,8 +136,28 @@ class DependencyContainer: ObservableObject {
         UNUserNotificationCenter.current().delegate = notificationServiceConcrete
         notificationServiceConcrete.ensureNotificationCategoriesRegistered()
 
+        // Add foreground cleanup observer for stale chains
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task {
+                guard let self = self else { return }
+
+                // Gate cleanup: only run if scheduling is not in progress
+                let isSchedulingActive = await self.refreshCoordinatorConcrete.isSchedulingActive()
+                if !isSchedulingActive {
+                    await self.chainedNotificationSchedulerConcrete.cleanupStaleChains()
+                    print("🧹 Ran stale chain cleanup (scheduling was idle)")
+                } else {
+                    print("⏳ Skipped stale chain cleanup (scheduling in progress)")
+                }
+            }
+        }
+
         didActivateNotifications = true
-        print("🔄 DependencyContainer: Activated notification delegate and lifecycle tracking")
+        print("🔄 DependencyContainer: Activated notification delegate, lifecycle tracking, and stale chain cleanup")
     }
 
     /// Activate observability systems (logging, metrics, etc.)
@@ -80,14 +173,15 @@ class DependencyContainer: ObservableObject {
     // MARK: - ViewModels
     func makeAlarmListViewModel() -> AlarmListViewModel {
         return AlarmListViewModel(
-            storage: persistenceService, 
+            storage: persistenceService,
             permissionService: permissionService,
-            notificationService: notificationService
+            notificationService: notificationService,
+            refresher: refreshCoordinatorConcrete
         )
     }
     
     func makeAlarmDetailViewModel(alarm: Alarm? = nil) -> AlarmDetailViewModel {
-        let targetAlarm = alarm ?? Alarm.blank
+        let targetAlarm = alarm ?? alarmFactory.makeNewAlarm()
         return AlarmDetailViewModel(alarm: targetAlarm, isNew: alarm == nil)
     }
     
@@ -100,7 +194,11 @@ class DependencyContainer: ObservableObject {
             appRouter: appRouter,
             permissionService: permissionService,
             reliabilityLogger: reliabilityLogger,
-            audioService: audioService
+            audioService: audioService,
+            audioEngine: audioEngine,
+            reliabilityModeProvider: settingsService,
+            dismissedRegistry: dismissedRegistryConcrete,
+            settingsService: settingsService
         )
     }
 }

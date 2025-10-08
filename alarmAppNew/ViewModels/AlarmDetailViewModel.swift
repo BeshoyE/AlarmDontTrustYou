@@ -21,9 +21,9 @@ class AlarmDetailViewModel:ObservableObject, Identifiable {
   var isValid: Bool {
     //qr challenge is either not selected or qr var is not empty
     let qrOK = !draft.challengeKind.contains(.qr) || (draft.expectedQR?.isEmpty == false)
-    let soundOK = draft.soundName != nil && !draft.soundName!.isEmpty
+    let soundOK = !draft.soundId.isEmpty
     let volumeOK = draft.volume >= 0.0 && draft.volume <= 1.0
-    return qrOK && soundOK && volumeOK && !draft.label.isEmpty && draft.time > Date()
+    return qrOK && soundOK && volumeOK && !draft.label.isEmpty
   }
 
   func commitChanges() -> Alarm {
@@ -53,9 +53,11 @@ class AlarmDetailViewModel:ObservableObject, Identifiable {
   }
   
   // MARK: - Sound Management
-  
-  func updateSound(_ soundName: String) {
-    draft.soundName = soundName
+
+  func updateSound(_ soundId: String) {
+    draft.soundId = soundId
+    // Keep soundName in sync for backward compatibility
+    draft.soundName = soundId
   }
   
   func updateVolume(_ volume: Double) {
@@ -69,9 +71,9 @@ class AlarmDetailViewModel:ObservableObject, Identifiable {
     )
   }
   
-  var soundNameBinding: Binding<String> {
+  var soundIdBinding: Binding<String> {
     Binding<String>(
-      get: { self.draft.soundName ?? "default" },
+      get: { self.draft.soundId },
       set: { self.updateSound($0) }
     )
   }

@@ -8,6 +8,7 @@
 import UserNotifications
 import SwiftUI
 import UIKit
+import os.log
 
 // MARK: - App Lifecycle Tracking
 
@@ -96,10 +97,12 @@ final class AppStateProvider: AppStateProviding {
 // MARK: - Notification Scheduling Protocol
 protocol NotificationScheduling {
   func scheduleAlarm(_ alarm: Alarm) async throws
-  func cancelAlarm(_ alarm: Alarm)
+  func cancelAlarm(_ alarm: Alarm) async
+  func cancelOccurrence(alarmId: UUID, occurrenceKey: String) async
   func cancelSpecificNotifications(for alarmId: UUID, types: [NotificationType])
   func refreshAll(from alarms: [Alarm]) async
   func pendingAlarmIds() async -> [UUID]
+  func scheduleAlarmImmediately(_ alarm: Alarm) async throws
   func scheduleTestNotification(soundName: String?, in seconds: TimeInterval) async throws
   func scheduleTestSystemDefault() async throws
   func scheduleTestCriticalSound() async throws
@@ -118,6 +121,21 @@ protocol NotificationScheduling {
   func scheduleBareDefaultTest() async throws
   func scheduleBareDefaultTestNoInterruption() async throws
   func scheduleBareDefaultTestNoCategory() async throws
+
+  // Background Audio Scheduling - removed, handled by DismissalFlow at fire time
+
+  // MARK: - Occurrence Cleanup (Post-Dismissal)
+  /// Get notification request IDs for a specific alarm occurrence
+  func getRequestIds(alarmId: UUID, occurrenceKey: String) async -> [String]
+
+  /// Remove notification requests by identifiers (both pending and delivered)
+  func removeRequests(withIdentifiers ids: [String]) async
+
+  /// Clean up all notifications for a dismissed occurrence
+  func cleanupAfterDismiss(alarmId: UUID, occurrenceKey: String) async
+
+  /// Clean up stale delivered notifications on app startup
+  func cleanupStaleDeliveredNotifications() async
 }
 
 enum NotificationType: String, CaseIterable {
@@ -128,6 +146,32 @@ enum NotificationType: String, CaseIterable {
   case nudge3 = "nudge_3"
 }
 
+// MARK: - Notification Classification
+
+private enum Categories {
+  static let alarm = "ALARM_CATEGORY"
+  static let alarmTest = "ALARM_TEST_CATEGORY"
+}
+
+enum NotificationClassification {
+  case realAlarm(UUID)
+  case test
+  case other
+}
+
+extension NotificationClassification: Equatable {
+  var alarmId: UUID? {
+    if case let .realAlarm(id) = self { return id }
+    return nil
+  }
+}
+
+// MARK: - UUID Extension for Type-Checker Performance
+
+private extension UUID {
+  var short8: String { String(self.uuidString.prefix(8)) }
+}
+
 class NotificationService: NSObject, NotificationScheduling, UNUserNotificationCenterDelegate {
   private let center = UNUserNotificationCenter.current()
   private let permissionService: PermissionServiceProtocol
@@ -135,19 +179,79 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
   private let reliabilityLogger: ReliabilityLogging
   private let appRouter: AppRouter
   private let persistenceService: AlarmStorage
+  private let chainedScheduler: ChainedNotificationScheduling
+  private let settingsService: SettingsServiceProtocol
+  private let audioEngine: AlarmAudioEngineProtocol
+  private let dismissedRegistry: DismissedRegistry
+  private let chainSettingsProvider: ChainSettingsProviding
 
-  init(permissionService: PermissionServiceProtocol, appStateProvider: AppStateProviding, reliabilityLogger: ReliabilityLogging, appRouter: AppRouter, persistenceService: AlarmStorage) {
+  init(
+    permissionService: PermissionServiceProtocol,
+    appStateProvider: AppStateProviding,
+    reliabilityLogger: ReliabilityLogging,
+    appRouter: AppRouter,
+    persistenceService: AlarmStorage,
+    chainedScheduler: ChainedNotificationScheduling,
+    settingsService: SettingsServiceProtocol,
+    audioEngine: AlarmAudioEngineProtocol,
+    dismissedRegistry: DismissedRegistry,
+    chainSettingsProvider: ChainSettingsProviding = DefaultChainSettingsProvider()
+  ) {
     self.permissionService = permissionService
     self.appStateProvider = appStateProvider
     self.reliabilityLogger = reliabilityLogger
     self.appRouter = appRouter
     self.persistenceService = persistenceService
+    self.chainedScheduler = chainedScheduler
+    self.settingsService = settingsService
+    self.audioEngine = audioEngine
+    self.dismissedRegistry = dismissedRegistry
+    self.chainSettingsProvider = chainSettingsProvider
     super.init()
   }
 
   func ensureNotificationCategoriesRegistered() {
     setupNotificationCategories()
     print("NotificationService: Categories registered/re-registered")
+  }
+
+  // MARK: - Notification Classification Helper
+
+  private func classifyNotification(_ content: UNNotificationContent) -> NotificationClassification {
+    // Test category first
+    if content.categoryIdentifier == Categories.alarmTest {
+      return .test
+    }
+
+    // Dual-era compatibility (one release only)
+    if content.categoryIdentifier == Categories.alarm {
+      // Check for explicit test flag
+      if content.userInfo["isTest"] as? Bool == true {
+        return .test
+      }
+
+      // Check for valid alarm ID
+      if let alarmIdString = content.userInfo["alarmId"] as? String,
+         let alarmId = UUID(uuidString: alarmIdString) {
+        return .realAlarm(alarmId)
+      }
+    }
+
+    return .other
+  }
+
+  private func logNotificationEvent(_ event: String, _ classification: NotificationClassification, categoryId: String, action: String? = nil) {
+    reliabilityLogger.log(
+      .notificationsStatusChanged,
+      alarmId: nil,
+      details: [
+        "event": event,
+        "categoryId": categoryId,
+        "actionId": action ?? "none",
+        "isTest": "\(classification == .test)",
+        "alarmId": classification.alarmId?.uuidString ?? "none"
+      ]
+    )
   }
 
   // MARK: - Centralized Content Setup
@@ -194,7 +298,7 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
   }
 
   private func setupNotificationCategories() {
-    // Build actions
+    // Build actions for real alarms
     let openAction = UNNotificationAction(
       identifier: "OPEN_ALARM",
       title: "Open",
@@ -213,26 +317,43 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
       options: []
     )
 
-    // Build category
+    // Real alarm category (unchanged behavior)
     let alarmCategory = UNNotificationCategory(
-      identifier: "ALARM_CATEGORY",
+      identifier: Categories.alarm,
       actions: [openAction, returnToDismissalAction, snoozeAction],
       intentIdentifiers: [],
       options: [.customDismissAction]
     )
 
-    // Register categories
-    center.setNotificationCategories([alarmCategory])
+    // Test category - NO dismissal actions (prevents accidental routing)
+    let testCategory = UNNotificationCategory(
+      identifier: Categories.alarmTest,
+      actions: [], // Empty - no dismissal routing possible
+      intentIdentifiers: [],
+      options: []
+    )
+
+    // Register both categories
+    center.setNotificationCategories([alarmCategory, testCategory])
   }
 
   @MainActor
   private func presentRingingWhenReady(_ id: UUID) async {
-    for _ in 0..<10 {
+    print("🔍 presentRingingWhenReady: Starting wait for scene activation (alarm: \(id.uuidString.prefix(8)))")
+
+    for attempt in 0..<10 {
       if let s = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-         s.activationState == .foregroundActive { break }
+         s.activationState == .foregroundActive {
+        print("✅ presentRingingWhenReady: Scene is active, routing now (attempt: \(attempt + 1))")
+        break
+      }
+      print("⏳ presentRingingWhenReady: Scene not active, waiting... (attempt: \(attempt + 1))")
       try? await Task.sleep(nanoseconds: 150_000_000) // 150ms
     }
+
+    print("🔍 presentRingingWhenReady: Calling appRouter.showRinging for alarm: \(id.uuidString.prefix(8))")
     appRouter.showRinging(for: id)
+    print("✅ presentRingingWhenReady: appRouter.showRinging completed")
   }
 
 
@@ -257,6 +378,79 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
       print("Warning: Notifications authorized but sound is disabled")
     }
 
+    // Check feature flag for chained scheduling
+    #if DEBUG
+    print("🔍 [DIAG] useChainedScheduling: \(await settingsService.useChainedScheduling)")
+    #endif
+
+    guard await settingsService.useChainedScheduling else {
+      // Fall back to legacy single-notification path
+      print("📊 NotificationService: Using legacy scheduling (feature flag disabled)")
+      return try await scheduleLegacyAlarm(alarm)
+    }
+
+    // CRITICAL: Compute next fire date from Domain logic
+    // Pass the EXACT Date to Infrastructure - no normalization, no reconstruction
+    guard let nextFireDate = computeNextFireDate(for: alarm) else {
+      print("❌ NotificationService: No valid next fire date for alarm \(alarm.id)")
+      throw NotificationError.invalidConfiguration
+    }
+
+    // Use chained notification scheduler with Domain-computed date
+    print("📊 NotificationService: Using chained scheduling for alarm \(alarm.id)")
+    print("📊 DOMAIN anchor: \(nextFireDate.ISO8601Format()) for alarm \(alarm.id.uuidString.prefix(8))")
+    let outcome = await chainedScheduler.scheduleChain(for: alarm, fireDate: nextFireDate)
+
+    #if DEBUG
+    print("🔍 [DIAG] Chain outcome: \(outcome)")
+    #endif
+
+    // Log outcome with structured context for prod triage
+    logScheduleOutcome(outcome, alarmId: alarm.id, fireDate: alarm.time)
+
+    // Handle outcome
+    switch outcome {
+    case .scheduled(let count):
+      // Success - count notifications scheduled
+      print("✅ NotificationService: Scheduled \(count) notifications for alarm \(alarm.id)")
+      return
+
+    case .trimmed(let original, let scheduled):
+      // Partial success - log warning but don't throw
+      print("⚠️ NotificationService: Trimmed chain for alarm \(alarm.id): \(original) → \(scheduled)")
+      reliabilityLogger.log(
+        .scheduled,
+        alarmId: alarm.id,
+        details: [
+          "outcome": "trimmed",
+          "original": "\(original)",
+          "scheduled": "\(scheduled)",
+          "fireDate": alarm.time.description
+        ]
+      )
+      return
+
+    case .unavailable(.permissions):
+      print("❌ NotificationService: Permissions denied for alarm \(alarm.id)")
+      throw NotificationError.permissionDenied
+
+    case .unavailable(.globalLimit):
+      print("❌ NotificationService: Global limit exceeded for alarm \(alarm.id)")
+      throw NotificationError.systemLimitExceeded
+
+    case .unavailable(.invalidConfiguration):
+      print("❌ NotificationService: Invalid configuration for alarm \(alarm.id) - domain gave past anchor")
+      throw NotificationError.invalidConfiguration
+
+    case .unavailable(.other(let error)):
+      print("❌ NotificationService: Scheduling failed for alarm \(alarm.id): \(error)")
+      throw error
+    }
+  }
+
+  // MARK: - Legacy Scheduling (Fallback)
+
+  private func scheduleLegacyAlarm(_ alarm: Alarm) async throws {
     if alarm.repeatDays.isEmpty {
       // One-time alarm
       try await scheduleOneTimeAlarm(alarm)
@@ -288,6 +482,8 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
       time: alarmTime,
       repeats: false
     )
+
+    // Background audio scheduling removed - handled by DismissalFlow at fire time
 
     // Schedule nudge notifications (30 seconds, 2 minutes, 5 minutes after)
     try await scheduleNotification(
@@ -333,6 +529,9 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
         timeOffset: 0,
         repeats: true
       )
+
+      // Note: Background audio for repeating alarms is scheduled closer to fire time
+      // to maintain reliability within the 5-10 minute scheduling window
 
       // Schedule nudge notifications for each day
       try await scheduleNotification(
@@ -412,137 +611,240 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
 
   // MARK: - UNUserNotificationCenterDelegate
 
+  @MainActor
   func userNotificationCenter(
     _ center: UNUserNotificationCenter,
     willPresent notification: UNNotification,
     withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
   ) {
     let content = notification.request.content
+    let classification = classifyNotification(content)
 
     // Phase 4: Enhanced delegate logging with exactly-once completion handler
-    var completed = false
+    var completed = false // MUST-FIX #1: var not let
     defer {
       assert(completed, "completionHandler must be called exactly once")
     }
 
-    print("📥 willPresent: id=\(notification.request.identifier) cat=\(content.categoryIdentifier) userInfo=\(content.userInfo)")
+    // Extract values for type-checker performance
+    let notifId: String = notification.request.identifier
+    let categoryId: String = content.categoryIdentifier
+    print("📥 willPresent: id=", notifId, "cat=", categoryId, "userInfo=", content.userInfo)
 
-    let isAlarmCategory = content.categoryIdentifier == "ALARM_CATEGORY"
+    switch classification {
+    case .realAlarm(let alarmId):
+      // Extract common values to avoid type-checker complexity
+      let alarmIdPrefix: String = alarmId.short8
+      let occurrenceKey: String? = content.userInfo["occurrenceKey"] as? String
 
-    // Early validation for ALARM_CATEGORY notifications
-    if isAlarmCategory {
-      guard let alarmIdString = content.userInfo["alarmId"] as? String,
-            let alarmId = UUID(uuidString: alarmIdString) else {
-        print("🔔 ❌ Missing or invalid alarmId in alarm notification")
-        reliabilityLogger.log(
-          .notificationsStatusChanged,
-          alarmId: nil,
-          details: ["error": "missing_alarmId", "userInfo": String(describing: content.userInfo)]
-        )
-        completed = true
-        completionHandler([])
-        return
+      // Check dismissed registry: skip routing if this occurrence was already dismissed
+      if let key = occurrenceKey {
+        if dismissedRegistry.isDismissed(alarmId: alarmId, occurrenceKey: key) {
+          let keyPrefix: String = String(key.prefix(10))
+          print("🔍 Occurrence", alarmIdPrefix + "/" + keyPrefix + "...", "already dismissed, skipping flow")
+
+          // Delivered notifications will be cleaned up by NotificationService.cleanupAfterDismiss()
+          // No need to do it here - just prevent presentation
+
+          completed = true
+          completionHandler([])  // Empty presentation options - don't show notification
+          return
+        }
+      } else {
+        // Fallback: check alarm runs for legacy compatibility
+        do {
+          let runs = try persistenceService.runs(for: alarmId)
+          let now = Date()
+          let recentSuccess = runs.first { (run: AlarmRun) in
+            guard run.outcome == .success else { return false }
+            let timeSinceFired = now.timeIntervalSince(run.firedAt)
+            return timeSinceFired < 300
+          }
+
+          if recentSuccess != nil {
+            print("⚠️ Legacy: Alarm", alarmIdPrefix, "already dismissed (missing occurrenceKey)")
+            completed = true
+            completionHandler([])
+            return
+          }
+        } catch {
+          print("⚠️ Failed to check alarm runs:", error)
+        }
       }
 
-      // For alarm notifications, ALWAYS allow sound regardless of app state
-      print("🔔 Alarm category detected - ALWAYS allowing [.banner, .list, .sound] for reliable wake-up")
-      reliabilityLogger.log(
-        .notificationsStatusChanged,
-        alarmId: alarmId,
-        details: ["event": "willPresent_alarm", "presentation": "allowed"]
-      )
+      // Get current policy for capability-based audio handling
+      let policy = settingsService.audioPolicy
+
+      // Foreground Assist: Play AV audio if app is active and capability allows
+      // Check suppressForegroundSound setting BEFORE playing audio
+      if policy.capability == .foregroundAssist &&
+         UIApplication.shared.applicationState == .active &&
+         !settingsService.suppressForegroundSound {
+        do {
+          // Fetch alarm to get sound name
+          if let alarm = try? persistenceService.alarm(with: alarmId) {
+            let soundName = alarm.soundName ?? "ringtone1"
+            try audioEngine.playForegroundAlarm(soundName: soundName)
+            print("🔔 Foreground Assist: Started AV audio for alarm", alarmIdPrefix)
+          }
+        } catch {
+          print("⚠️ Foreground Assist: Failed to play AV audio -", error)
+          // Continue with notification sound as fallback
+        }
+      } else if settingsService.suppressForegroundSound && UIApplication.shared.applicationState == .active {
+        print("🔔 Foreground Assist: Suppressing foreground sound (setting enabled)")
+      }
+
+      // Smart sound suppression: suppress notification sound ONLY if audio engine is actively ringing
+      // SINGLE SOURCE: Only check audioEngine.isActivelyRinging (engine handles policy internally)
+      let audioRinging: Bool = audioEngine.isActivelyRinging
+      let suppressSetting: Bool = settingsService.suppressForegroundSound
+      let shouldSuppressSound = audioRinging && suppressSetting
+
+      let options: UNNotificationPresentationOptions = shouldSuppressSound
+        ? [.banner, .list]              // Audio engine is providing sound
+        : [.banner, .list, .sound]      // Notifications provide sound
+
+      // Extract values for type-checker performance
+      let optsStr: String = String(describing: options)
+      let capabilityStr: String = String(describing: policy.capability)
+      print("🔔 Real alarm detected - capability:", capabilityStr, "options:", optsStr)
+
+      #if DEBUG
+      print("🔍 [DIAG] willPresent - audioRinging:", audioRinging, "suppressSetting:", suppressSetting, "opts:", optsStr)
+      #endif
 
       completed = true
+      completionHandler(options)
+
+      logNotificationEvent("willPresent_real", classification, categoryId: content.categoryIdentifier)
+
+      // willPresent is for presentation options only - NO routing
+      // User must explicitly tap notification to trigger didReceive → routing
+
+    case .test:
+      // Test notification - allow sound but NO routing
+      print("📥 Test notification - allowing sound, no dismissal routing")
+      completed = true
       completionHandler([.banner, .list, .sound])
-      print("✅ willPresent → [.banner,.list,.sound]")
 
-      // Route to enforced ringing flow for alarm handling
-      Task {
-        await MainActor.run {
-          print("NotificationService: Routing to ringing for alarm: \(alarmId)")
-        }
+      logNotificationEvent("willPresent_test", classification, categoryId: content.categoryIdentifier)
+      // No routing for tests - this fixes the bug!
 
-        // Check if this is a test notification
-        if let typeString = content.userInfo["type"] as? String, typeString.contains("test") {
-          // For test notifications, try to present ringing but handle gracefully if alarm not found
-          await presentRingingWhenReady(alarmId)
-          // Note: presentRingingWhenReady handles missing alarms gracefully in AppRouter
-        } else {
-          // For real alarms, always try to present
-          await presentRingingWhenReady(alarmId)
-        }
-
-        // Log the event
-        await MainActor.run {
-          reliabilityLogger.logAlarmFired(alarmId, details: ["source": "willPresent"])
-        }
-      }
-    } else {
-      // For non-alarm notifications, use default behavior
+    case .other:
+      // Unknown notification - default handling
       print("ℹ️ Non-alarm notification - using default presentation")
       completed = true
       completionHandler([.banner, .list])
-      print("ℹ️ willPresent → non-alarm default")
+
+      logNotificationEvent("willPresent_other", classification, categoryId: content.categoryIdentifier)
     }
   }
 
+  @MainActor
   func userNotificationCenter(_ center: UNUserNotificationCenter,
                               didReceive response: UNNotificationResponse,
                               withCompletionHandler completionHandler: @escaping () -> Void) {
     let content = response.notification.request.content
+    let classification = classifyNotification(content)
 
-    // Early validation - ensure this is an ALARM_CATEGORY notification with valid userInfo
-    guard content.categoryIdentifier == "ALARM_CATEGORY" else {
-      reliabilityLogger.log(
-        .notificationsStatusChanged,
-        alarmId: nil,
-        details: ["error": "invalid_category", "category": content.categoryIdentifier, "action": response.actionIdentifier]
-      )
-      completionHandler()
-      return
-    }
+    let actionId: String = response.actionIdentifier
+    print("NotificationService: didReceive response, action:", actionId)
 
-    guard let alarmIdString = content.userInfo["alarmId"] as? String,
-          let alarmId = UUID(uuidString: alarmIdString) else {
-      reliabilityLogger.log(
-        .notificationsStatusChanged,
-        alarmId: nil,
-        details: ["error": "missing_alarmId", "userInfo": String(describing: content.userInfo), "action": response.actionIdentifier]
-      )
-      completionHandler()
-      return
-    }
+    switch classification {
+    case .realAlarm(let alarmId):
+      // Extract common values to avoid type-checker complexity
+      let alarmIdPrefix: String = alarmId.short8
+      let occurrenceKey: String? = content.userInfo["occurrenceKey"] as? String
 
-    print("NotificationService: didReceive response for alarm: \(alarmId), action: \(response.actionIdentifier)")
+      // Real alarm - handle routing based on action
+      logNotificationEvent("didReceive_real", classification, categoryId: content.categoryIdentifier, action: response.actionIdentifier)
 
-    switch response.actionIdentifier {
-    case UNNotificationDefaultActionIdentifier, "OPEN_ALARM", "RETURN_TO_DISMISSAL":
-      // Route to dismissal flow (guaranteed main thread)
-      Task { @MainActor in
-        print("NotificationService: Routing to ringing from notification tap/action for alarm: \(alarmId)")
-        await presentRingingWhenReady(alarmId)
-
-        // Log the event
-        let source = getSourceName(for: response.actionIdentifier)
-        reliabilityLogger.logAlarmFired(alarmId, details: ["source": source])
+      // Check if this occurrence was already dismissed
+      if let key = occurrenceKey {
+        if dismissedRegistry.isDismissed(alarmId: alarmId, occurrenceKey: key) {
+          let keyPrefix: String = String(key.prefix(10))
+          print("🔍 didReceive: Occurrence", alarmIdPrefix + "/" + keyPrefix + "...", "already dismissed, skipping routing")
+          // Delivered notifications cleaned up by NotificationService.cleanupAfterDismiss()
+          completionHandler()
+          return
+        }
+      } else {
+        // Legacy fallback: check AlarmRun history
+        do {
+          let runs: [AlarmRun] = try persistenceService.loadRuns()
+          let now = Date()
+          let isDismissed = runs.contains(where: { (run: AlarmRun) in
+            guard run.alarmId == alarmId else { return false }
+            guard run.dismissedAt != nil else { return false }
+            let timeSinceFired = abs(now.timeIntervalSince(run.firedAt))
+            return timeSinceFired < 120  // Within last 2 minutes
+          })
+          if isDismissed {
+            print("🔍 didReceive: Alarm", alarmIdPrefix, "recently completed (legacy check), skipping routing")
+            completionHandler()
+            return
+          }
+        } catch {
+          print("⚠️ Failed to check alarm runs in didReceive:", error)
+        }
       }
 
-    case "SNOOZE_ALARM":
-      // Handle snooze in background
-      Task {
-        await handleSnoozeAction(alarmId: alarmId)
+      // CHUNK 2.6: Strengthen guards before routing
+      // Log warning if occurrenceKey missing (legacy mode)
+      if occurrenceKey == nil {
+        print("⚠️ didReceive: Missing occurrenceKey for alarm", alarmIdPrefix, "- using legacy mode")
       }
 
-    default:
-      print("NotificationService: Unknown action identifier: \(response.actionIdentifier)")
-      reliabilityLogger.log(
-        .notificationsStatusChanged,
-        alarmId: alarmId,
-        details: ["error": "unknown_action", "action": response.actionIdentifier]
-      )
-    }
+      // Final validation: only route on explicit user actions
+      // (Snooze and unknown actions handled below in switch)
+      guard [UNNotificationDefaultActionIdentifier, "OPEN_ALARM", "RETURN_TO_DISMISSAL", "SNOOZE_ALARM"].contains(response.actionIdentifier) else {
+        print("⚠️ didReceive: Non-routing action", response.actionIdentifier, "for alarm", alarmIdPrefix)
+        completionHandler()
+        return
+      }
 
-    completionHandler()
+      switch response.actionIdentifier {
+      case UNNotificationDefaultActionIdentifier, "OPEN_ALARM", "RETURN_TO_DISMISSAL":
+        // Route to dismissal flow (guaranteed main thread)
+        Task {
+          print("🔍 NotificationService: Routing to ringing from notification tap for alarm:", alarmIdPrefix)
+          await presentRingingWhenReady(alarmId)
+          print("✅ NotificationService: Notification tap routing completed for alarm:", alarmIdPrefix)
+
+          let source = getSourceName(for: response.actionIdentifier)
+          reliabilityLogger.logAlarmFired(alarmId, details: ["source": source])
+        }
+
+      case "SNOOZE_ALARM":
+        // Handle snooze in background
+        Task {
+          await handleSnoozeAction(alarmId: alarmId)
+        }
+
+      default:
+        print("NotificationService: Unknown action identifier: \(response.actionIdentifier)")
+        reliabilityLogger.log(
+          .notificationsStatusChanged,
+          alarmId: alarmId,
+          details: ["error": "unknown_action", "action": response.actionIdentifier]
+        )
+      }
+
+      completionHandler() // MUST-FIX #4: Call on every path
+
+    case .test:
+      // Test notification tapped - log and return (NO routing)
+      print("🧪 Test notification tapped - not routing to dismissal flow")
+      logNotificationEvent("didReceive_test", classification, categoryId: content.categoryIdentifier, action: response.actionIdentifier)
+      completionHandler() // MUST-FIX #4: Call on every path
+
+    case .other:
+      // Unknown notification category
+      print("⚠️ Unknown notification category tapped: \(content.categoryIdentifier)")
+      logNotificationEvent("didReceive_other", classification, categoryId: content.categoryIdentifier, action: response.actionIdentifier)
+      completionHandler() // MUST-FIX #4: Call on every path
+    }
   }
 
   private func getSourceName(for actionIdentifier: String) -> String {
@@ -588,16 +890,163 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
     }
   }
 
-  func cancelAlarm(_ alarm: Alarm) {
-    let allIdentifiers = generateAllNotificationIdentifiers(for: alarm)
+  func cancelAlarm(_ alarm: Alarm) async {
+    let alarmIdShort = alarm.id.uuidString.prefix(8)
 
-    // Remove pending notifications
-    center.removePendingNotificationRequests(withIdentifiers: allIdentifiers)
+    // Step 1: Clear the chain index
+    if await settingsService.useChainedScheduling {
+      await chainedScheduler.cancelChain(alarmId: alarm.id)
+    }
+
+    // Step 2: Remove ALL pending notifications by prefix (orphan cleanup)
+    let pending = await center.pendingNotificationRequests()
+    let alarmPrefix = "alarm-\(alarm.id.uuidString)"
+    let legacyPrefix = alarm.id.uuidString
+
+    let toRemove = pending.compactMap { request -> String? in
+      let id = request.identifier
+      if id.hasPrefix(alarmPrefix) || id.hasPrefix(legacyPrefix) {
+        return id
+      }
+      return nil
+    }
+
+    let pendingRemoved = toRemove.count
+    if !toRemove.isEmpty {
+      center.removePendingNotificationRequests(withIdentifiers: toRemove)
+    }
+
+    // Step 3: Count delivered before removal
+    let deliveredBefore = await center.deliveredNotifications()
+    let deliveredForAlarm = deliveredBefore.filter { notif in
+      if let alarmId = notif.request.content.userInfo["alarmId"] as? String {
+        return alarmId == alarm.id.uuidString
+      }
+      return false
+    }
+    let deliveredRemoved = deliveredForAlarm.count
 
     // Remove delivered notifications
-    Task {
-      await removeDeliveredNotifications(for: alarm.id, types: NotificationType.allCases)
+    await removeDeliveredNotifications(for: alarm.id, types: NotificationType.allCases)
+
+    print("📊 cancelAlarm \(alarmIdShort): removed {pending:\(pendingRemoved), delivered:\(deliveredRemoved)}")
+  }
+
+  func cancelOccurrence(alarmId: UUID, occurrenceKey: String) async {
+    // Occurrence-scoped cancellation: only cancel notifications for this specific occurrence
+    // Used for repeating alarms to avoid nuking future occurrences
+
+    if await settingsService.useChainedScheduling {
+      // Delegate to chained scheduler for occurrence-scoped cancellation
+      await chainedScheduler.cancelOccurrence(alarmId: alarmId, occurrenceKey: occurrenceKey)
+
+      // Extract values for type-checker performance
+      let alarmIdPrefix: String = alarmId.short8
+      let keyPrefix: String = String(occurrenceKey.prefix(10))
+      print("📊 NotificationService: Canceled occurrence", alarmIdPrefix + "/" + keyPrefix + "...")
+    } else {
+      // Legacy path: time-window fallback
+      print("⚠️ NotificationService: cancelOccurrence called in legacy mode - using time-window fallback")
+      // For legacy, we don't have fine-grained occurrence tracking, so just clear delivered
     }
+
+    // Remove delivered notifications for this occurrence
+    await removeDeliveredNotifications(for: alarmId, types: NotificationType.allCases)
+  }
+
+  // MARK: - Occurrence Cleanup Implementation
+
+  func getRequestIds(alarmId: UUID, occurrenceKey: String) async -> [String] {
+    guard await settingsService.useChainedScheduling else {
+      return []  // Legacy mode doesn't support occurrence-scoped cleanup
+    }
+
+    // Primary path: Filter chained scheduler index by occurrence key
+    let allIdentifiers = chainedScheduler.getIdentifiers(alarmId: alarmId)
+    let filtered = allIdentifiers.filter { identifier in
+      identifier.contains("-occ-\(occurrenceKey)-")
+    }
+
+    // Fallback: If index returns empty, scan pending/delivered (resilience against index mismatch)
+    if filtered.isEmpty {
+      let alarmIdPrefix = alarmId.short8
+      print("⚠️ getRequestIds: Index empty for", alarmIdPrefix, "- using fallback scan")
+
+      let pending = await center.pendingNotificationRequests()
+      let delivered = await fetchDeliveredNotifications()
+
+      let matchingPending = pending.filter { request in
+        guard let key = request.content.userInfo["occurrenceKey"] as? String else { return false }
+        return key == occurrenceKey
+      }.map { $0.identifier }
+
+      let matchingDelivered = delivered.filter { notification in
+        guard let key = notification.request.content.userInfo["occurrenceKey"] as? String else { return false }
+        return key == occurrenceKey
+      }.map { $0.request.identifier }
+
+      return Array(Set(matchingPending + matchingDelivered))  // Deduplicate
+    }
+
+    return filtered
+  }
+
+  func removeRequests(withIdentifiers ids: [String]) async {
+    guard !ids.isEmpty else { return }
+
+    // Remove from both pending and delivered
+    center.removePendingNotificationRequests(withIdentifiers: ids)
+    center.removeDeliveredNotifications(withIdentifiers: ids)
+  }
+
+  func cleanupAfterDismiss(alarmId: UUID, occurrenceKey: String) async {
+    // Get all notification IDs for this occurrence
+    let ids = await getRequestIds(alarmId: alarmId, occurrenceKey: occurrenceKey)
+
+    guard !ids.isEmpty else {
+      let alarmIdPrefix = alarmId.short8
+      let keyPrefix = String(occurrenceKey.prefix(10))
+      print("⚠️ dismiss_cleanup: No IDs found for", alarmIdPrefix + "/" + keyPrefix + "...")
+      return
+    }
+
+    // Count before removal for logging
+    let pendingBefore = await center.pendingNotificationRequests()
+    let deliveredBefore = await fetchDeliveredNotifications()
+    let pendingCount = pendingBefore.filter { ids.contains($0.identifier) }.count
+    let deliveredCount = deliveredBefore.filter { ids.contains($0.request.identifier) }.count
+
+    // Remove notifications
+    await removeRequests(withIdentifiers: ids)
+
+    // Structured logging with correlation IDs
+    let alarmIdPrefix = alarmId.short8
+    let keyPrefix = String(occurrenceKey.prefix(10))
+    print("🧹 dismiss_cleanup: alarm=\(alarmIdPrefix) occ=\(keyPrefix)... removed_pending=\(pendingCount) removed_delivered=\(deliveredCount)")
+  }
+
+  func cleanupStaleDeliveredNotifications() async {
+    let delivered = await fetchDeliveredNotifications()
+    let dismissedKeys = await dismissedRegistry.dismissedOccurrenceKeys()
+
+    // Filter delivered notifications whose occurrence keys are in dismissed set
+    let toRemove = delivered.filter { notification in
+      guard let key = notification.request.content.userInfo["occurrenceKey"] as? String else {
+        return false
+      }
+      return dismissedKeys.contains(key)
+    }.map { $0.request.identifier }
+
+    guard !toRemove.isEmpty else {
+      print("🧹 startup_cleanup: No stale notifications found")
+      return
+    }
+
+    // Remove both delivered and pending (in case any are still scheduled)
+    center.removeDeliveredNotifications(withIdentifiers: toRemove)
+    center.removePendingNotificationRequests(withIdentifiers: toRemove)
+
+    print("🧹 startup_cleanup: removed=\(toRemove.count)")
   }
 
   func cancelSpecificNotifications(for alarmId: UUID, types: [NotificationType]) {
@@ -621,17 +1070,119 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
     }
   }
 
-  func refreshAll(from alarms: [Alarm]) async {
-    // Cancel all pending notifications
-    center.removeAllPendingNotificationRequests()
+  // MARK: - Immediate Scheduling (Critical Path)
 
-    // Re-schedule all enabled alarms
+  func scheduleAlarmImmediately(_ alarm: Alarm) async throws {
+    print("📊 scheduleAlarmImmediately: Starting for alarm \(alarm.id.uuidString.prefix(8))")
+
+    // Guard: Only schedule enabled alarms
+    guard alarm.isEnabled else {
+      print("📊 scheduleAlarmImmediately: Alarm \(alarm.id.uuidString.prefix(8)) is disabled, skipping")
+      return
+    }
+
+    // Use existing scheduleAlarm which has all the proper protections:
+    // - Domain anchor computation
+    // - Background task wrapper in ChainedNotificationScheduler
+    // - Serialized remove-then-add
+    // - Interval-only triggers
+    try await scheduleAlarm(alarm)
+
+    // CRITICAL POST-CHECK: Verify notifications were actually scheduled
+    let pending = await center.pendingNotificationRequests()
+    let alarmIdString = alarm.id.uuidString
+    let ourPending = pending.filter { request in
+      request.content.userInfo["alarmId"] as? String == alarmIdString ||
+      request.identifier.contains(alarmIdString)
+    }
+
+    print("📊 IMMEDIATE post_check: alarm=\(alarm.id.uuidString.prefix(8)) pendingCount=\(ourPending.count) ids=\(ourPending.map { $0.identifier })")
+
+    // For chained scheduling, we expect 3 notifications (base + 2 follow-ups)
+    // For legacy, we expect at least 1
+    let expectedMinimum = await settingsService.useChainedScheduling ? 3 : 1
+
+    if ourPending.count < expectedMinimum {
+      print("❌ CRITICAL FAILURE: Expected at least \(expectedMinimum) notifications but only \(ourPending.count) are pending for alarm \(alarm.id.uuidString.prefix(8))")
+      throw NotificationError.schedulingFailed
+    }
+
+    print("✅ scheduleAlarmImmediately: Successfully scheduled \(ourPending.count) notifications for alarm \(alarm.id.uuidString.prefix(8))")
+  }
+
+  func refreshAll(from alarms: [Alarm]) async {
+    print("📊 refreshAll: STARTING with \(alarms.count) alarms")
+
+    // Step 1: Compute desired identifiers for all enabled alarms
+    var desiredByAlarm: [UUID: Set<String>] = [:]
+    var allDesired = Set<String>()
+
     for alarm in alarms where alarm.isEnabled {
-      do {
-        try await scheduleAlarm(alarm)
-      } catch {
-        print("Failed to schedule alarm \(alarm.id): \(error)")
+      let identifiers = await computeDesiredIdentifiers(for: alarm)
+      desiredByAlarm[alarm.id] = identifiers
+      allDesired.formUnion(identifiers)
+    }
+
+    // Step 2: Fetch pending from OS and our index, union them (handles OS lag)
+    let pendingRequests = await center.pendingNotificationRequests()
+    let osPending = Set(pendingRequests.compactMap { request in
+      let id = request.identifier
+      return isOurNotification(id) ? id : nil
+    })
+
+    // Also include what we have in our notification index (handles OS lag window)
+    let indexedIdentifiers = chainedScheduler.getAllTrackedIdentifiers()
+
+    // Union OS pending with our index (covers OS lag window)
+    let ourPending = osPending.union(indexedIdentifiers)
+
+    // Step 3: Compute diff
+    let planned = allDesired.count
+    let toAdd = allDesired.subtracting(ourPending)
+    let toRemove = ourPending.subtracting(allDesired)
+
+    // Step 4: Apply changes atomically (remove then add)
+    if !toRemove.isEmpty {
+      center.removePendingNotificationRequests(withIdentifiers: Array(toRemove))
+    }
+
+    // Step 5: Schedule only missing notifications per alarm
+    var addedSuccess = 0
+    for alarm in alarms where alarm.isEnabled {
+      guard let alarmDesired = desiredByAlarm[alarm.id] else { continue }
+      let missingForAlarm = alarmDesired.intersection(toAdd)
+
+      if !missingForAlarm.isEmpty {
+        do {
+          try await scheduleMissingIdentifiers(for: alarm, identifiers: missingForAlarm)
+          addedSuccess += missingForAlarm.count
+        } catch {
+          print("Failed to schedule missing notifications for alarm \(alarm.id.uuidString.prefix(8)): \(error)")
+        }
       }
+    }
+
+    // Step 6: Get actual pending count after operations
+    let pendingAfter = await center.pendingNotificationRequests()
+    let pendingAfterCount = pendingAfter.filter { isOurNotification($0.identifier) }.count
+
+    // Step 7: Structured logging with accurate metrics
+    print("📊 refreshAll: planned=\(planned) pending_before=\(ourPending.count) added_success=\(addedSuccess) removed=\(toRemove.count) pending_after=\(pendingAfterCount)")
+
+    // Log details for debugging
+    if addedSuccess > 0 || toRemove.count > 0 {
+      reliabilityLogger.log(
+        .notificationsStatusChanged,
+        alarmId: nil,
+        details: [
+          "event": "refresh_all_diff",
+          "planned": "\(planned)",
+          "pending_before": "\(ourPending.count)",
+          "added_success": "\(addedSuccess)",
+          "removed_count": "\(toRemove.count)",
+          "pending_after": "\(pendingAfterCount)"
+        ]
+      )
     }
   }
 
@@ -644,6 +1195,56 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
       }
       return UUID(uuidString: alarmIdString)
     }
+  }
+
+  // MARK: - Outcome Logging
+
+  /// Logs ScheduleOutcome with structured context for production triage
+  private func logScheduleOutcome(_ outcome: ScheduleOutcome, alarmId: UUID, fireDate: Date) {
+    let outcomeString: String
+    let details: [String: String]
+
+    switch outcome {
+    case .scheduled(let count):
+      outcomeString = "scheduled(\(count))"
+      details = [
+        "event": "chained_schedule_success",
+        "outcome": outcomeString,
+        "count": "\(count)",
+        "fireDate": fireDate.ISO8601Format(),
+        "useChainedScheduling": "true"
+      ]
+
+    case .trimmed(let original, let scheduled):
+      outcomeString = "trimmed(\(original)→\(scheduled))"
+      details = [
+        "event": "chained_schedule_trimmed",
+        "outcome": outcomeString,
+        "original": "\(original)",
+        "scheduled": "\(scheduled)",
+        "fireDate": fireDate.ISO8601Format(),
+        "useChainedScheduling": "true"
+      ]
+
+    case .unavailable(let reason):
+      let reasonString = String(describing: reason)
+      outcomeString = "unavailable(\(reasonString))"
+      details = [
+        "event": "chained_schedule_failed",
+        "outcome": outcomeString,
+        "reason": reasonString,
+        "fireDate": fireDate.ISO8601Format(),
+        "useChainedScheduling": "true"
+      ]
+    }
+
+    reliabilityLogger.log(
+      .scheduled,
+      alarmId: alarmId,
+      details: details
+    )
+
+    print("📊 NotificationService: Outcome logged for alarm \(alarmId): \(outcomeString)")
   }
 
   // MARK: - Settings Diagnostics
@@ -718,21 +1319,35 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
   private func removeDeliveredNotifications(for alarmId: UUID, types: [NotificationType]) async {
     let deliveredNotifications = await fetchDeliveredNotifications()
 
-    // Generate exact expected identifiers using the same logic as scheduling
-    let expectedIdentifiers = generateExpectedIdentifiers(for: alarmId, types: types)
+    // Determine which identifier format to use based on chained scheduling setting
+    let useChainedScheduling = await settingsService.useChainedScheduling
 
-    // Find delivered notifications that match our exact identifiers
     var identifiersToRemove: [String] = []
-    for notification in deliveredNotifications {
-      let identifier = notification.request.identifier
-      if expectedIdentifiers.contains(identifier) {
-        identifiersToRemove.append(identifier)
+
+    if useChainedScheduling {
+      // Chained scheduling: identifiers follow pattern "alarm-{uuid}-occ-{ISO8601}-{occurrence}"
+      // Match any delivered notification whose identifier starts with "alarm-{alarmId}"
+      let prefix = "alarm-\(alarmId.uuidString)-occ-"
+      for notification in deliveredNotifications {
+        let identifier = notification.request.identifier
+        if identifier.hasPrefix(prefix) {
+          identifiersToRemove.append(identifier)
+        }
+      }
+    } else {
+      // Legacy scheduling: use exact identifier matching
+      let expectedIdentifiers = generateExpectedIdentifiers(for: alarmId, types: types)
+      for notification in deliveredNotifications {
+        let identifier = notification.request.identifier
+        if expectedIdentifiers.contains(identifier) {
+          identifiersToRemove.append(identifier)
+        }
       }
     }
 
     if !identifiersToRemove.isEmpty {
       center.removeDeliveredNotifications(withIdentifiers: identifiersToRemove)
-      print("NotificationService: Removed \(identifiersToRemove.count) delivered notifications for alarm \(alarmId)")
+      print("NotificationService: Removed \(identifiersToRemove.count) delivered notifications for alarm \(alarmId) (chained: \(useChainedScheduling))")
     }
   }
 
@@ -801,6 +1416,159 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
     }
 
     return identifiers
+  }
+
+  // MARK: - Idempotent Scheduling Helpers
+
+  /// Compute all expected notification identifiers for an alarm
+  private func computeDesiredIdentifiers(for alarm: Alarm) async -> Set<String> {
+    // If disabled, return empty set immediately
+    guard alarm.isEnabled else { return [] }
+
+    // Check if using chained scheduling
+    if await settingsService.useChainedScheduling {
+      // Always compute from Domain schedule (source of truth)
+      guard let nextFireDate = computeNextFireDate(for: alarm) else {
+        return []
+      }
+
+      // Get chain configuration from POLICY, not magic numbers
+      let chainSettings = chainSettingsProvider.chainSettings()
+      let spacingSeconds = chainSettings.fallbackSpacingSec
+
+      // Compute chain count based on window and spacing
+      let chainCount = min(
+        chainSettings.maxChainCount,
+        chainSettings.ringWindowSec / max(1, spacingSeconds)
+      )
+
+      // Generate identifiers based on actual next fire date
+      let occurrenceKey = OccurrenceKeyFormatter.key(from: nextFireDate)
+      var identifiers = Set<String>()
+
+      for i in 0..<chainCount {
+        let id = "alarm-\(alarm.id.uuidString)-occ-\(occurrenceKey)-\(i)"
+        identifiers.insert(id)
+      }
+
+      return identifiers
+    } else {
+      // Legacy mode: use existing identifier generation
+      return Set(generateAllNotificationIdentifiers(for: alarm))
+    }
+  }
+
+  /// Check if an identifier belongs to our app's namespace
+  private func isOurNotification(_ identifier: String) -> Bool {
+    // Chained format: alarm-{uuid}-occ-{key}-{n}
+    if identifier.hasPrefix("alarm-") {
+      return true
+    }
+
+    // Legacy format: {uuid}-{type} or {uuid}-{type}-weekday-{n}
+    // Check if it starts with a valid UUID
+    let components = identifier.components(separatedBy: "-")
+    if components.count >= 2,
+       let firstComponent = components.first,
+       UUID(uuidString: firstComponent) != nil {
+      return true
+    }
+
+    return false
+  }
+
+  /// Schedule only the missing notifications for an alarm
+  private func scheduleMissingIdentifiers(for alarm: Alarm, identifiers: Set<String>) async throws {
+    // For chained scheduling, we need to re-run the full schedule
+    // because notifications are interdependent
+    if await settingsService.useChainedScheduling {
+      // The chained scheduler will handle deduplication internally
+      try await scheduleAlarm(alarm)
+    } else {
+      // For legacy mode, we can be more surgical
+      // But since legacy schedules all types at once, easier to just reschedule
+      try await scheduleAlarm(alarm)
+    }
+  }
+
+  /// Normalize a date to have 0 seconds and nanoseconds
+  private func normalizeToMinute(_ date: Date) -> Date {
+    let calendar = Calendar.current
+    var components = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: date)
+    components.second = 0
+    components.nanosecond = 0
+    return calendar.date(from: components) ?? date
+  }
+
+  /// Compute next fire date for an alarm
+  private func computeNextFireDate(for alarm: Alarm) -> Date? {
+    let now = Date()
+    let calendar = Calendar.current
+
+    if alarm.repeatDays.isEmpty {
+      // One-time alarm: Pure domain logic - today if future, tomorrow if past
+      var components = calendar.dateComponents([.year, .month, .day], from: now)
+      let timeComponents = calendar.dateComponents([.hour, .minute], from: alarm.time)
+      components.hour = timeComponents.hour
+      components.minute = timeComponents.minute
+      components.second = 0
+
+      guard let candidate = calendar.date(from: components) else { return nil }
+
+      // Simple rule: If candidate > now, use today; otherwise tomorrow
+      let fireDate: Date
+      let policyReason: String
+      if candidate > now {
+        fireDate = candidate
+        policyReason = "TODAY_SINGLE"
+      } else {
+        fireDate = calendar.date(byAdding: .day, value: 1, to: candidate) ?? candidate
+        policyReason = "TOMORROW_SINGLE"
+      }
+
+      // Log domain decision
+      os_log("NextOccurrence: policy=%@ now=%@ candidate=%@ anchor=%@",
+             log: OSLog.default, type: .info, policyReason,
+             now.ISO8601Format(), candidate.ISO8601Format(), fireDate.ISO8601Format())
+
+      return fireDate
+    } else {
+      // Repeating alarm - find next occurrence
+      let weekday = calendar.component(.weekday, from: now)
+      let alarmTime = calendar.dateComponents([.hour, .minute], from: alarm.time)
+
+      // Check each day starting from today to find the next occurrence
+      for dayOffset in 0..<7 {
+        let targetWeekday = ((weekday - 1 + dayOffset) % 7) + 1
+        let targetDay = Weekdays(rawValue: targetWeekday)
+
+        if alarm.repeatDays.contains(targetDay ?? .sunday) {
+          var components = calendar.dateComponents([.year, .month, .day], from: now)
+          components.hour = alarmTime.hour
+          components.minute = alarmTime.minute
+          components.second = 0
+
+          guard let candidate = calendar.date(from: components) else { continue }
+          let fireDate = calendar.date(byAdding: .day, value: dayOffset, to: candidate) ?? candidate
+
+          // For today (dayOffset=0), check if time is still in the future
+          if dayOffset == 0 && fireDate <= now {
+            continue  // Skip today, try next matching day
+          }
+
+          // Found valid future occurrence
+          let policyReason = dayOffset == 0 ? "TODAY_REPEAT" : "NEXT_WEEKDAY_REPEAT"
+
+          os_log("NextOccurrence: policy=%@ now=%@ dayOffset=%d anchor=%@",
+                 log: OSLog.default, type: .info, policyReason,
+                 now.ISO8601Format(), dayOffset, fireDate.ISO8601Format())
+
+          return fireDate
+        }
+      }
+    }
+
+    return nil
   }
 
   private func createNotificationSound(for soundName: String?) -> UNNotificationSound {
@@ -883,8 +1651,8 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
     }
 
     let testAlarmId = UUID()
-    content.userInfo = ["alarmId": testAlarmId.uuidString, "type": "test_default"]
-    content.categoryIdentifier = "ALARM_CATEGORY"
+    content.userInfo = ["alarmId": testAlarmId.uuidString, "type": "test_default", "isTest": true]
+    content.categoryIdentifier = Categories.alarmTest
 
     print("  - userInfo: \(content.userInfo)")
 
@@ -918,8 +1686,8 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
     }
 
     let testAlarmId = UUID()
-    content.userInfo = ["alarmId": testAlarmId.uuidString, "type": "test_critical"]
-    content.categoryIdentifier = "ALARM_CATEGORY"
+    content.userInfo = ["alarmId": testAlarmId.uuidString, "type": "test_critical", "isTest": true]
+    content.categoryIdentifier = Categories.alarmTest
 
     let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 4.0, repeats: false)
     let request = UNNotificationRequest(
@@ -954,8 +1722,8 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
       content.interruptionLevel = .timeSensitive
     }
 
-    content.userInfo = ["alarmId": testAlarmId.uuidString, "type": "test_custom"]
-    content.categoryIdentifier = "ALARM_CATEGORY"
+    content.userInfo = ["alarmId": testAlarmId.uuidString, "type": "test_custom", "isTest": true]
+    content.categoryIdentifier = Categories.alarmTest
 
     let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 4.0, repeats: false)
     let request = UNNotificationRequest(
@@ -985,6 +1753,32 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
   func scheduleTestNotification(soundName: String?, in seconds: TimeInterval = 5.0) async throws {
     try await scheduleTestNotificationWithSound(soundName: soundName)
   }
+
+  // MARK: - Sound Resolution (for diagnostics)
+  // Background audio scheduling removed - handled by DismissalFlow at fire time
+
+  /// Resolve sound names to actual bundled asset files
+  private func resolveSoundToActualFile(_ soundName: String?) -> String {
+    // Handle nil, empty, or "default" - these need to map to actual bundle files
+    guard let soundName = soundName, !soundName.isEmpty, soundName != "default" else {
+      print("🔊 NotificationService: Mapping 'default'/nil sound to 'ringtone1'")
+      return "ringtone1"
+    }
+
+    // Map any unknown sounds to known assets (fallback chain)
+    let knownSounds = ["ringtone1", "classic", "chime", "bell", "radar"]
+    if knownSounds.contains(soundName) {
+      return "ringtone1" // All our current sounds map to ringtone1 for now
+    }
+
+    // Unknown sound - use fallback
+    print("🔊 NotificationService: Unknown sound '\(soundName)' - falling back to 'ringtone1'")
+    return "ringtone1"
+  }
+
+  // stopAlarmAudio removed - handled directly by DismissalFlow via protocol
+
+  // Removed scheduleNextRepeatingAlarmAudio - background audio now handled by DismissalFlow at fire time
 
   // MARK: - Sound Triage System (Device Only)
 
@@ -1095,8 +1889,8 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
   private func configureBaseContent(_ content: UNMutableNotificationContent, id: UUID, label: String, type: String) {
     content.title = "🔔 \(label)"
     content.body = "Lock now — should play sound"
-    content.categoryIdentifier = "ALARM_CATEGORY"
-    content.userInfo = ["alarmId": id.uuidString, "type": type]
+    content.categoryIdentifier = Categories.alarmTest // Use test category
+    content.userInfo = ["alarmId": id.uuidString, "type": type, "isTest": true] // Add isTest flag
 
     if #available(iOS 15.0, *) {
       content.interruptionLevel = .timeSensitive
@@ -1155,8 +1949,8 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
     // Manual content setup (bypass configureBaseContent to avoid any sound touching)
     content.title = "🔔 Custom Sound"
     content.body = "Lock now — should play CUSTOM ringtone1.caf sound"
-    content.categoryIdentifier = "ALARM_CATEGORY"
-    content.userInfo = ["alarmId": id.uuidString, "type": "test_custom"]
+    content.categoryIdentifier = Categories.alarmTest
+    content.userInfo = ["alarmId": id.uuidString, "type": "test_custom", "isTest": true]
 
     // Set Time Sensitive BEFORE sound assignment
     if #available(iOS 15.0, *) {
@@ -1212,16 +2006,17 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
       }
     }
 
-    // 2) Register a simple category
-    let cat = UNNotificationCategory(identifier: "TEST_CAT", actions: [], intentIdentifiers: [], options: [])
-    center.setNotificationCategories([cat])
+    // 2) Register test category (use existing test category)
+    let testCategory = UNNotificationCategory(identifier: Categories.alarmTest, actions: [], intentIdentifiers: [], options: [])
+    center.setNotificationCategories([testCategory])
 
     // 3) Minimal content with default sound
     let content = UNMutableNotificationContent()
     content.title = "🔔 Bare Default Test"
     content.body = "Should ring with default sound on lock"
     content.sound = .default
-    content.categoryIdentifier = "TEST_CAT"
+    content.categoryIdentifier = Categories.alarmTest
+    content.userInfo = ["alarmId": UUID().uuidString, "type": "test_bare_default", "isTest": true]
     if #available(iOS 15.0, *) { content.interruptionLevel = .timeSensitive } // not .passive
 
     let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 6, repeats: false)
@@ -1268,16 +2063,17 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
       }
     }
 
-    // 2) Register a simple category
-    let cat = UNNotificationCategory(identifier: "TEST_CAT", actions: [], intentIdentifiers: [], options: [])
-    center.setNotificationCategories([cat])
+    // 2) Register test category (use existing test category)
+    let testCategory = UNNotificationCategory(identifier: Categories.alarmTest, actions: [], intentIdentifiers: [], options: [])
+    center.setNotificationCategories([testCategory])
 
     // 3) Minimal content with default sound - NO interruptionLevel set
     let content = UNMutableNotificationContent()
     content.title = "🔔 Bare Default Test (No Interruption)"
     content.body = "Should ring with default sound on lock"
     content.sound = .default
-    content.categoryIdentifier = "TEST_CAT"
+    content.categoryIdentifier = Categories.alarmTest
+    content.userInfo = ["alarmId": UUID().uuidString, "type": "test_bare_no_interruption", "isTest": true]
     // NOTE: Deliberately NOT setting interruptionLevel to eliminate that variable
 
     let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 8, repeats: false)
@@ -1440,6 +2236,8 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
 enum NotificationError: Error, LocalizedError {
   case permissionDenied
   case schedulingFailed
+  case systemLimitExceeded
+  case invalidConfiguration
 
   var errorDescription: String? {
     switch self {
@@ -1447,6 +2245,10 @@ enum NotificationError: Error, LocalizedError {
       return "Notification permission is required to schedule alarms"
     case .schedulingFailed:
       return "Failed to schedule notification"
+    case .systemLimitExceeded:
+      return "Too many alarms scheduled. Please disable some alarms to add more."
+    case .invalidConfiguration:
+      return "Invalid alarm configuration - alarm time is in the past"
     }
   }
 }

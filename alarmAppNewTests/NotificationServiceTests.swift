@@ -10,30 +10,7 @@ import XCTest
 import UserNotifications
 @testable import alarmAppNew
 
-// MARK: - Mock Permission Service
-
-class MockPermissionService: PermissionServiceProtocol {
-    var mockNotificationDetails = PermissionDetails(
-        authorizationStatus: .authorized,
-        isAuthorizedButMuted: false
-    )
-
-    func checkNotificationPermission() async -> PermissionDetails {
-        return mockNotificationDetails
-    }
-
-    func checkCameraPermission() -> UNAuthorizationStatus {
-        return .authorized
-    }
-
-    func requestCameraPermission() async -> UNAuthorizationStatus {
-        return .authorized
-    }
-
-    func requestNotificationPermission() async -> (UNAuthorizationStatus, Bool) {
-        return (.authorized, true)
-    }
-}
+// Mock Permission Service is defined in TestMocks.swift
 
 // MARK: - Mock Notification Center
 
@@ -69,18 +46,36 @@ final class NotificationServiceTests: XCTestCase {
     var notificationService: NotificationService!
     var mockPermissionService: MockPermissionService!
     var mockCenter: MockNotificationCenter!
+    var mockAppStateProvider: MockAppStateProvider!
+    var mockReliabilityLogger: MockReliabilityLogger!
+    var appRouter: AppRouter!
+    var mockAlarmStorage: MockAlarmStorage!
 
-    override func setUp() {
+    @MainActor override func setUp() {
         super.setUp()
         mockPermissionService = MockPermissionService()
         mockCenter = MockNotificationCenter()
-        notificationService = NotificationService(permissionService: mockPermissionService)
+        mockAppStateProvider = MockAppStateProvider()
+        mockReliabilityLogger = MockReliabilityLogger()
+        appRouter = AppRouter()
+        mockAlarmStorage = MockAlarmStorage()
+        notificationService = NotificationService(
+            permissionService: mockPermissionService,
+            appStateProvider: mockAppStateProvider,
+            reliabilityLogger: mockReliabilityLogger,
+            appRouter: appRouter,
+            persistenceService: mockAlarmStorage
+        )
     }
 
     override func tearDown() {
         notificationService = nil
         mockPermissionService = nil
         mockCenter = nil
+        mockAppStateProvider = nil
+        mockReliabilityLogger = nil
+        appRouter = nil
+        mockAlarmStorage = nil
         super.tearDown()
     }
 
@@ -91,7 +86,7 @@ final class NotificationServiceTests: XCTestCase {
         time: Date = Date().addingTimeInterval(3600), // 1 hour from now
         label: String = "Test Alarm",
         repeatDays: [Weekdays] = [],
-        soundName: String? = "default"
+        soundId: String = "chimes01"
     ) -> Alarm {
         return Alarm(
             id: id,
@@ -103,7 +98,7 @@ final class NotificationServiceTests: XCTestCase {
             stepThreshold: nil,
             mathChallenge: nil,
             isEnabled: true,
-            soundName: soundName,
+            soundId: soundId,
             volume: 0.8
         )
     }
@@ -181,9 +176,11 @@ final class NotificationServiceTests: XCTestCase {
     // MARK: - Permission Tests
 
     func test_scheduleAlarm_deniedPermission_shouldThrowError() async {
-        mockPermissionService.mockNotificationDetails = PermissionDetails(
-            authorizationStatus: .denied,
-            isAuthorizedButMuted: false
+        mockPermissionService.mockNotificationDetails = NotificationPermissionDetails(
+            authorizationStatus: PermissionStatus.denied,
+            alertsEnabled: false,
+            soundEnabled: false,
+            badgeEnabled: false
         )
 
         let alarm = createTestAlarm()
@@ -200,9 +197,11 @@ final class NotificationServiceTests: XCTestCase {
     }
 
     func test_scheduleAlarm_mutedNotifications_shouldWarnButProceed() async throws {
-        mockPermissionService.mockNotificationDetails = PermissionDetails(
-            authorizationStatus: .authorized,
-            isAuthorizedButMuted: true
+        mockPermissionService.mockNotificationDetails = NotificationPermissionDetails(
+            authorizationStatus: PermissionStatus.authorized,
+            alertsEnabled: false,
+            soundEnabled: false,
+            badgeEnabled: true
         )
 
         let alarm = createTestAlarm()
@@ -214,10 +213,10 @@ final class NotificationServiceTests: XCTestCase {
 
     // MARK: - Cancellation Tests
 
-    func test_cancelAlarm_shouldRemoveAllRelatedNotifications() {
+    func test_cancelAlarm_shouldRemoveAllRelatedNotifications() async {
         let alarm = createTestAlarm(repeatDays: [.monday, .tuesday])
 
-        notificationService.cancelAlarm(alarm)
+        await notificationService.cancelAlarm(alarm)
 
         // Should generate correct identifiers for cancellation
         XCTAssertTrue(true)
@@ -270,27 +269,27 @@ final class NotificationServiceTests: XCTestCase {
 
     func test_createNotificationSound_defaultSound_shouldReturnDefault() {
         // Test through scheduled notification
-        let alarm = createTestAlarm(soundName: "default")
+        let alarm = createTestAlarm(soundId: "chimes01")
 
         // Sound creation is tested implicitly through scheduling
         XCTAssertEqual(alarm.soundName, "default")
     }
 
     func test_createNotificationSound_customSound_shouldUseCustom() {
-        let alarm = createTestAlarm(soundName: "chime")
+        let alarm = createTestAlarm(soundId: "bells01")
 
         XCTAssertEqual(alarm.soundName, "chime")
     }
 
     func test_createNotificationSound_invalidSound_shouldFallbackToDefault() {
-        let alarm = createTestAlarm(soundName: "nonexistent")
+        let alarm = createTestAlarm(soundId: "nonexistent")
 
         // Service should handle invalid sounds gracefully
         XCTAssertEqual(alarm.soundName, "nonexistent")
     }
 
     func test_createNotificationSound_nilSound_shouldUseDefault() {
-        let alarm = createTestAlarm(soundName: nil)
+        let alarm = createTestAlarm() // Uses default soundId
 
         XCTAssertNil(alarm.soundName)
     }
@@ -390,5 +389,72 @@ final class NotificationServiceTests: XCTestCase {
 
         // Should handle past times (may not actually schedule, but shouldn't crash)
         XCTAssertTrue(true)
+    }
+
+    // MARK: - Idempotent Scheduling Tests
+
+    func test_refreshAll_idempotent_noDuplicates() async {
+        // Given: An alarm that should be scheduled
+        let alarm = createTestAlarm()
+        alarm.isEnabled = true
+        let alarms = [alarm]
+
+        // When: refreshAll is called twice
+        await notificationService.refreshAll(from: alarms)
+        let firstCount = mockCenter.scheduledRequests.count
+
+        await notificationService.refreshAll(from: alarms)
+        let secondCount = mockCenter.scheduledRequests.count
+
+        // Then: No duplicate notifications are created
+        // Note: With idempotent scheduling, the second call should not add more notifications
+        // if the first call already scheduled them
+        XCTAssertGreaterThan(firstCount, 0, "First refresh should schedule notifications")
+
+        // The count might be the same or less (due to diff-based scheduling)
+        // but should not increase
+        XCTAssertLessThanOrEqual(secondCount, firstCount,
+                                  "Second refresh should not create duplicates")
+    }
+
+    func test_refreshAll_disabledAlarm_removesNotifications() async {
+        // Given: An enabled alarm that gets scheduled
+        let alarm = createTestAlarm()
+        alarm.isEnabled = true
+        await notificationService.refreshAll(from: [alarm])
+
+        let scheduledCount = mockCenter.scheduledRequests.count
+        XCTAssertGreaterThan(scheduledCount, 0, "Should have scheduled notifications")
+
+        // When: The alarm is disabled and refreshAll is called
+        alarm.isEnabled = false
+        await notificationService.refreshAll(from: [alarm])
+
+        // Then: Notifications should be removed
+        // With idempotent scheduling, disabled alarm notifications are removed
+        XCTAssertGreaterThan(mockCenter.removedIdentifiers.count, 0,
+                             "Should have removed notifications for disabled alarm")
+    }
+
+    func test_refreshAll_namespace_isolated() async {
+        // Given: Some existing non-app notifications (simulated)
+        let foreignRequest = UNNotificationRequest(
+            identifier: "com.other.app.notification",
+            content: UNMutableNotificationContent(),
+            trigger: nil
+        )
+        mockCenter.scheduledRequests.append(foreignRequest)
+
+        // When: refreshAll is called with our alarms
+        let alarm = createTestAlarm()
+        alarm.isEnabled = true
+        await notificationService.refreshAll(from: [alarm])
+
+        // Then: Foreign notifications should not be removed
+        let foreignStillExists = mockCenter.scheduledRequests.contains {
+            $0.identifier == "com.other.app.notification"
+        }
+        XCTAssertTrue(foreignStillExists || !mockCenter.removedIdentifiers.contains("com.other.app.notification"),
+                      "Should not remove foreign notifications")
     }
 }

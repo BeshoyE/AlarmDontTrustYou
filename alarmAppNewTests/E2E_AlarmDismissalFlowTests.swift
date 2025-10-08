@@ -50,7 +50,9 @@ class E2E_AlarmDismissalFlowTests: XCTestCase {
             expectedQR: testQRCode,
             stepThreshold: nil,
             mathChallenge: nil,
-            isEnabled: true
+            isEnabled: true,
+            soundId: "chimes01",
+            volume: 0.8
         )
         
         // WHEN: User enables alarm (should schedule notification)
@@ -124,7 +126,9 @@ class E2E_AlarmDismissalFlowTests: XCTestCase {
             expectedQR: testQRCode,
             stepThreshold: nil,
             mathChallenge: nil,
-            isEnabled: true
+            isEnabled: true,
+            soundId: "chimes01",
+            volume: 0.8
         )
         
         // WHEN: Schedule alarm
@@ -177,7 +181,9 @@ class E2E_AlarmDismissalFlowTests: XCTestCase {
                 expectedQR: "smoke-test-qr-\(i)",
                 stepThreshold: nil,
                 mathChallenge: nil,
-                isEnabled: true
+                isEnabled: true,
+                soundId: "chimes01",
+                volume: 0.8
             )
             alarms.append(alarm)
             alarmListVM.add(alarm)
@@ -241,7 +247,9 @@ class E2E_AlarmDismissalFlowTests: XCTestCase {
             expectedQR: nil, // Missing QR code
             stepThreshold: nil,
             mathChallenge: nil,
-            isEnabled: false
+            isEnabled: false,
+            soundId: "chimes01",
+            volume: 0.8
         )
         
         let alarmListVM = dependencyContainer.makeAlarmListViewModel()

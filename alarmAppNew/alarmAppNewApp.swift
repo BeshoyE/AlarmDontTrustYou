@@ -39,13 +39,18 @@ struct alarmAppNewApp: App {
         // Clean activation via DI container
         dependencyContainer.activateNotificationDelegate()
 
-        // First-launch migration: refresh all alarms to ensure userInfo consistency
-        // This cleans up any legacy requests missing userInfo
+        // Startup sequence: delegate → refresh → cleanup
+        // Ensures correct initialization order per architecture requirements
         Task {
             do {
+                // 1. Load and refresh all alarms for userInfo consistency
                 let alarms = try await dependencyContainer.persistenceService.loadAlarms()
-                await dependencyContainer.notificationService.refreshAll(from: alarms)
-                print("App Launch: Refreshed all alarms for userInfo consistency")
+                await dependencyContainer.refreshCoordinator.requestRefresh(alarms: alarms)
+                print("App Launch: Refreshed all alarms for userInfo consistency (via coordinator)")
+
+                // 2. Clean up stale delivered notifications from previous sessions
+                await dependencyContainer.notificationService.cleanupStaleDeliveredNotifications()
+                print("App Launch: Cleaned up stale notifications")
             } catch {
                 print("App Launch: Failed to refresh alarms: \(error)")
             }

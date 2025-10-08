@@ -37,10 +37,10 @@ struct AlarmFormView: View {
        }
        
        Section(header: Text("Sound")) {
-         // Sound Picker
-         Picker("Sound", selection: detailVM.soundNameBinding) {
-           ForEach(DependencyContainer.shared.audioService.listAvailableSounds(), id: \.name) { sound in
-             Text(sound.displayName).tag(sound.name)
+         // Sound Picker - Use SoundCatalog for consistency with alarm model
+         Picker("Sound", selection: detailVM.soundIdBinding) {
+           ForEach(DependencyContainer.shared.soundCatalog.all, id: \.id) { sound in
+             Text(sound.name).tag(sound.id)
            }
          }
          .pickerStyle(.menu)

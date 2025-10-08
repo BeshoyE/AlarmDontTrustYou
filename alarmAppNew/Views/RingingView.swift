@@ -43,7 +43,11 @@ struct RingingView: View {
                 case .scanning:
                     ScanningContent(
                         cancelScan: { viewModel.cancelScan() },
-                        onScanned: { payload in viewModel.didScan(payload: payload) }
+                        onScanned: { payload in
+                            Task {
+                                await viewModel.didScan(payload: payload)
+                            }
+                        }
                     )
                     
                 case .validating:

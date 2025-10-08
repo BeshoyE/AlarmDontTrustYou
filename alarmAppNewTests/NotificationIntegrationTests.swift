@@ -10,16 +10,9 @@ import XCTest
 import UserNotifications
 @testable import alarmAppNew
 
-// MARK: - Mock App State Provider
+// Mock App State Provider is defined in TestMocks.swift
 
-class MockAppStateProvider: AppStateProviding {
-    var mockIsAppActive: Bool = false
-
-    var isAppActive: Bool {
-        return mockIsAppActive
-    }
-}
-
+@MainActor
 final class NotificationIntegrationTests: XCTestCase {
     var notificationService: NotificationService!
     var mockPermissionService: MockPermissionService!
@@ -32,9 +25,9 @@ final class NotificationIntegrationTests: XCTestCase {
         mockAppStateProvider = MockAppStateProvider()
 
         // Create minimal mock dependencies for testing
-        let mockReliabilityLogger = LocalReliabilityLogger()
+        let mockReliabilityLogger = MockReliabilityLogger()
         let mockAppRouter = AppRouter()
-        let mockPersistenceService = PersistenceService()
+        let mockPersistenceService = MockAlarmStorage()
 
         notificationService = NotificationService(
             permissionService: mockPermissionService,
@@ -65,7 +58,7 @@ final class NotificationIntegrationTests: XCTestCase {
         time: Date = Date().addingTimeInterval(300), // 5 minutes from now
         label: String = "Integration Test Alarm",
         repeatDays: [Weekdays] = [],
-        soundName: String? = "default"
+        soundId: String = "chimes01"
     ) -> Alarm {
         return Alarm(
             id: id,
@@ -77,7 +70,7 @@ final class NotificationIntegrationTests: XCTestCase {
             stepThreshold: nil,
             mathChallenge: nil,
             isEnabled: true,
-            soundName: soundName,
+            soundId: soundId,
             volume: 0.8
         )
     }
@@ -106,7 +99,7 @@ final class NotificationIntegrationTests: XCTestCase {
         XCTAssertTrue(alarmNotifications.count > 0, "Should have scheduled notifications for the alarm")
 
         // Cancel the alarm
-        notificationService.cancelAlarm(alarm)
+        await notificationService.cancelAlarm(alarm)
         await waitForNotificationScheduling()
 
         // Verify notifications were cancelled
@@ -137,7 +130,7 @@ final class NotificationIntegrationTests: XCTestCase {
     }
 
     func test_notificationSound_integration_shouldUseCorrectSound() async throws {
-        let customSoundAlarm = createTestAlarm(soundName: "chime")
+        let customSoundAlarm = createTestAlarm(soundId: "bells01")
 
         try await notificationService.scheduleAlarm(customSoundAlarm)
         await waitForNotificationScheduling()
@@ -286,7 +279,7 @@ final class NotificationIntegrationTests: XCTestCase {
     }
 
     func test_soundFallback_integration_shouldHandleInvalidSound() async throws {
-        let alarm = createTestAlarm(soundName: "nonexistent_sound")
+        let alarm = createTestAlarm(soundId: "nonexistent_sound")
 
         // Should not throw despite invalid sound
         try await notificationService.scheduleAlarm(alarm)
@@ -421,7 +414,7 @@ final class NotificationIntegrationTests: XCTestCase {
         let expectedIdentifiers = generateExpectedNotificationIdentifiers(for: alarm.id, types: allTypes)
 
         // Cancel entire alarm
-        notificationService.cancelAlarm(alarm)
+        await notificationService.cancelAlarm(alarm)
         await waitForNotificationScheduling()
 
         // Verify no future notifications remain in pending queue
@@ -559,7 +552,6 @@ final class NotificationIntegrationTests: XCTestCase {
         XCTAssertTrue(provider.isAppActive, "Should report app as active")
     }
 
-    @MainActor
     func test_appStateProvider_mainActorAnnotation() async {
         // Test that the real AppStateProvider is properly marked as MainActor
         let provider = AppStateProvider()
@@ -575,9 +567,11 @@ final class NotificationIntegrationTests: XCTestCase {
     // MARK: - Error Handling Integration Tests
 
     func test_permissionDenied_integration_shouldThrowError() async {
-        mockPermissionService.mockNotificationDetails = PermissionDetails(
-            authorizationStatus: .denied,
-            isAuthorizedButMuted: false
+        mockPermissionService.mockNotificationDetails = NotificationPermissionDetails(
+            authorizationStatus: PermissionStatus.denied,
+            alertsEnabled: false,
+            soundEnabled: false,
+            badgeEnabled: false
         )
 
         let alarm = createTestAlarm()

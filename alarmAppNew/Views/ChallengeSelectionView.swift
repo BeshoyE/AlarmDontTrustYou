@@ -88,7 +88,8 @@ struct ChallengeSelectionView: View {
             challengeKind: [.math],  // Pre-populate with a challenge to see checkmark
             expectedQR: nil,
             isEnabled: true,
-            volume: 2.0
+            soundId: "chimes01",
+            volume: 0.8
         ))
     )
 }

@@ -17,16 +17,19 @@ class AlarmListViewModel: ObservableObject {
   private let storage: AlarmStorage
   private let permissionService: PermissionServiceProtocol
   private let notificationService: NotificationScheduling
+  private let refresher: RefreshRequesting
 
   init(
     storage: AlarmStorage,
     permissionService: PermissionServiceProtocol,
-    notificationService: NotificationScheduling
+    notificationService: NotificationScheduling,
+    refresher: RefreshRequesting
   ) {
     self.storage = storage
     self.permissionService = permissionService
     self.notificationService = notificationService
-    
+    self.refresher = refresher
+
     fetchAlarms()
     checkNotificationPermissions()
   }
@@ -100,41 +103,47 @@ class AlarmListViewModel: ObservableObject {
   private func sync(_ alarm: Alarm) async {
     do {
       try storage.saveAlarms(alarms)
-      
-      // Cancel existing alarm notifications
-      notificationService.cancelAlarm(alarm)
-      
-      // Schedule if enabled
-      if alarm.isEnabled {
-        // Data model guardrail: Don't schedule alarms without expectedQR (QR-only MVP)
-        guard alarm.expectedQR != nil else {
-          await MainActor.run {
-            self.errorMessage = "Cannot schedule alarm: QR code required for dismissal"
-          }
-          return
-        }
-        
-        // Check permissions before scheduling
-        let permissionDetails = await permissionService.checkNotificationPermission()
-        
-        if permissionDetails.authorizationStatus != .authorized {
-          await MainActor.run {
-            self.showPermissionBlocking = true
-          }
-          return
-        }
-        
-        try await notificationService.scheduleAlarm(alarm)
+
+      // Handle scheduling based on enabled state
+      if !alarm.isEnabled {
+        // Cancel notifications when disabling
+        await notificationService.cancelAlarm(alarm)
+        print("Alarm \(alarm.id.uuidString.prefix(8)): Cancelled (disabled)")
+      } else {
+        // CRITICAL: Use immediate scheduling path for enables/adds
+        // This ensures scheduling completes even if app backgrounds
+        try await notificationService.scheduleAlarmImmediately(alarm)
+        print("Alarm \(alarm.id.uuidString.prefix(8)): Scheduled immediately")
       }
-      
+
+      // Still trigger refresh for other alarms (non-blocking, best-effort)
+      // This handles any other alarms that might need reconciliation
+      Task.detached { [weak self] in
+        guard let self = self else { return }
+        await self.refresher.requestRefresh(alarms: self.alarms)
+        print("Alarm \(alarm.id.uuidString.prefix(8)): Background refresh triggered")
+      }
+
       await MainActor.run {
         self.errorMessage = nil
         self.checkNotificationPermissions() // Refresh permission status
       }
     } catch {
       await MainActor.run {
-        if error is NotificationError {
-          self.errorMessage = error.localizedDescription
+        // Handle specific notification errors with appropriate messaging
+        if let notificationError = error as? NotificationError {
+          switch notificationError {
+          case .systemLimitExceeded:
+            // Provide helpful guidance for system limit
+            self.errorMessage = "Too many alarms scheduled. Please disable some alarms to add more (iOS limit: 64 notifications)."
+          case .permissionDenied:
+            self.errorMessage = notificationError.localizedDescription
+            self.showPermissionBlocking = true
+          case .schedulingFailed:
+            self.errorMessage = notificationError.localizedDescription
+          case .invalidConfiguration:
+            self.errorMessage = notificationError.localizedDescription
+          }
         } else {
           self.errorMessage = "Could not update alarm"
         }

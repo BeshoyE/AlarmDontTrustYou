@@ -8,8 +8,14 @@
 // alarmAppNew/…/AppRouter.swift
 import SwiftUI
 
+protocol AppRouting {
+    func showDismissal(for id: UUID)
+    func showRinging(for id: UUID)
+    func backToList()
+}
+
 @MainActor
-final class AppRouter: ObservableObject {
+final class AppRouter: ObservableObject, AppRouting {
     enum Route: Equatable {
         case alarmList
         case dismissal(alarmID: UUID) // Legacy stub route - can be removed after migration

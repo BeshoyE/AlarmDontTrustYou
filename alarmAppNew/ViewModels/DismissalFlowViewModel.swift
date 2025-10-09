@@ -162,15 +162,12 @@ final class DismissalFlowViewModel: ObservableObject {
             let currentMode = reliabilityModeProvider.currentMode
             print("DismissalFlow: Starting alarm with reliability mode: \(currentMode.rawValue)")
 
-            // Check if we should play sound based on suppressForegroundSound setting
+            // CRITICAL: In foreground, app audio ALWAYS plays (owns the sound)
+            // suppressForegroundSound only affects OS notification sounds (handled by NotificationService)
+            // This ensures loud foreground audio without double-audio issues
             let isAppActive = UIApplication.shared.applicationState == .active
-            let shouldPlaySound = !settingsService.suppressForegroundSound || !isAppActive
 
-            if !shouldPlaySound {
-                print("DismissalFlow: Suppressing foreground sound (setting enabled and app is active)")
-            }
-
-            if currentMode == .notificationsPlusAudio && shouldPlaySound {
+            if currentMode == .notificationsPlusAudio {
                 // Enhanced mode: use background audio engine + notifications
                 do {
                     let soundName = alarm.soundName ?? "ringtone1"
@@ -194,19 +191,18 @@ final class DismissalFlowViewModel: ObservableObject {
                 } catch {
                     print("DismissalFlow: Enhanced mode failed, falling back to audioService: \(error)")
                     // Fallback to audioService if audioEngine fails
-                    if shouldPlaySound {
-                        Task {
-                            await audioService.startRinging(
-                                soundName: alarm.soundName,
-                                volume: alarm.volume,
-                                loop: true
-                            )
-                        }
+                    Task {
+                        await audioService.startRinging(
+                            soundName: alarm.soundName,
+                            volume: alarm.volume,
+                            loop: true
+                        )
                     }
                 }
-            } else if shouldPlaySound {
+            } else {
                 // Standard mode: notifications-only (App Store safe)
-                print("DismissalFlow: Standard mode - using audioService only (no background audio engine)")
+                // ALWAYS play foreground audio when dismissal view is visible
+                print("DismissalFlow: Standard mode - using audioService for foreground audio")
                 Task {
                     await audioService.startRinging(
                         soundName: alarm.soundName,

@@ -16,12 +16,18 @@ struct AlarmsListView: View {
   @State private var detailVM: AlarmDetailViewModel?
   @State private var showSettings = false
 
-  init() {
-        _vm = StateObject(wrappedValue: DependencyContainer.shared.makeAlarmListViewModel())
+  // Store container for child views
+  private let container: DependencyContainer
+
+  // Primary initializer - accepts injected container
+  init(container: DependencyContainer) {
+        self.container = container
+        _vm = StateObject(wrappedValue: container.makeAlarmListViewModel())
     }
 
     // For testing/preview purposes with a pre-configured view model
-    init(preConfiguredVM: AlarmListViewModel) {
+    init(preConfiguredVM: AlarmListViewModel, container: DependencyContainer) {
+        self.container = container
         _vm = StateObject(wrappedValue: preConfiguredVM)
     }
 
@@ -44,11 +50,37 @@ struct AlarmsListView: View {
             Section {
               NotificationPermissionInlineWarning(
                 permissionDetails: permissionDetails,
-                permissionService: DependencyContainer.shared.permissionService
+                permissionService: container.permissionService
               )
             }
           }
-          
+
+          // Media volume warning banner
+          if vm.showMediaVolumeWarning {
+            Section {
+              VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                  Image(systemName: "speaker.wave.1")
+                    .foregroundColor(.orange)
+                  Text("Low Media Volume Detected")
+                    .font(.headline)
+                    .foregroundColor(.orange)
+                }
+
+                Text("Your media volume is low. This won't affect lock-screen alarms (they use ringer volume), but in-app sounds may be quiet.")
+                  .font(.caption)
+                  .foregroundColor(.secondary)
+
+                Button("Dismiss") {
+                  vm.showMediaVolumeWarning = false
+                }
+                .font(.caption)
+                .foregroundColor(.accentColor)
+              }
+              .padding(.vertical, 4)
+            }
+          }
+
           ForEach(vm.alarms) { alarm in
             AlarmRowView(
               alarm: alarm,
@@ -79,7 +111,7 @@ struct AlarmsListView: View {
           HStack {
             Spacer()
             Button {
-              detailVM = DependencyContainer.shared.makeAlarmDetailViewModel()
+              detailVM = container.makeAlarmDetailViewModel()
             } label: {
               Image(systemName: "plus")
                 .font(.title2)
@@ -114,31 +146,35 @@ struct AlarmsListView: View {
 
             Button("Test Lock Screen Notification", systemImage: "lock.circle") {
               Task {
-                try? await DependencyContainer.shared.notificationService.scheduleTestSystemDefault()
+                try? await container.notificationService.scheduleTestSystemDefault()
               }
+            }
+
+            Button("Test Lock-Screen Alarm (8s)", systemImage: "bell.badge.fill") {
+              vm.testLockScreen()
             }
 
             Button("Run Sound Triage", systemImage: "stethoscope") {
               Task {
-                try? await DependencyContainer.shared.notificationService.runCompleteSoundTriage()
+                try? await container.notificationService.runCompleteSoundTriage()
               }
             }
 
             Button("Bare Default Test", systemImage: "exclamationmark.triangle") {
               Task {
-                try? await DependencyContainer.shared.notificationService.scheduleBareDefaultTest()
+                try? await container.notificationService.scheduleBareDefaultTest()
               }
             }
 
             Button("Bare Test (No Interruption)", systemImage: "bell.slash") {
               Task {
-                try? await DependencyContainer.shared.notificationService.scheduleBareDefaultTestNoInterruption()
+                try? await container.notificationService.scheduleBareDefaultTestNoInterruption()
               }
             }
 
             Button("Bare Test (No Category)", systemImage: "bell.badge") {
               Task {
-                try? await DependencyContainer.shared.notificationService.scheduleBareDefaultTestNoCategory()
+                try? await container.notificationService.scheduleBareDefaultTestNoCategory()
               }
             }
 
@@ -157,15 +193,23 @@ struct AlarmsListView: View {
         vm.ensureNotificationPermissionIfNeeded()
       // initial fetch when the screen appears
       }
-      .onChange(of: scenePhase) { _, phase in
+      .onChange(of: scenePhase) { phase in
           if phase == .active {               // returning from Settings or prompt
               vm.refreshPermission()
+
+              // Check for active alarms and route to dismissal if needed
+              Task {
+                  if let (alarm, occurrenceKey) = await container.activeAlarmDetector.checkForActiveAlarm() {
+                      print("📱 AlarmsListView: Auto-routing to dismissal for alarm \(alarm.id.uuidString.prefix(8))")
+                      router.showDismissal(for: alarm.id)
+                  }
+              }
           }
       }
 
     }
     .sheet(item: $detailVM) { formVM in
-      AlarmFormView(detailVM: formVM) {
+      AlarmFormView(detailVM: formVM, container: container) {
         if formVM.isNewAlarm {
           let newAlarm = formVM.commitChanges()
           vm.add(newAlarm)
@@ -177,7 +221,7 @@ struct AlarmsListView: View {
     }
     .sheet(isPresented: $vm.showPermissionBlocking) {
       NotificationPermissionBlockingView(
-        permissionService: DependencyContainer.shared.permissionService,
+        permissionService: container.permissionService,
         onPermissionGranted: {
           vm.handlePermissionGranted()
         }
@@ -189,7 +233,7 @@ struct AlarmsListView: View {
                 }
             }
     .sheet(isPresented: $showSettings) {
-      SettingsView()
+      SettingsView(container: container)
     }
   }
 }
@@ -240,18 +284,17 @@ struct AlarmRowView: View {
 }
 
 #Preview {
-    AlarmsListView(preConfiguredVM: {
-        let container = DependencyContainer.shared
-        let vm = container.makeAlarmListViewModel()
+    let container = DependencyContainer()
+    let vm = container.makeAlarmListViewModel()
 
-        vm.alarms = [
-            Alarm(id: UUID(), time: Date(), label: "Morning", repeatDays: [.monday], challengeKind: [], isEnabled: true, soundId: "chimes01", volume: 0.5),
-            Alarm(id: UUID(), time: Date(), label: "Work", repeatDays: [], challengeKind: [.math], isEnabled: true, soundId: "bells01", volume: 0.7),
-            Alarm(id: UUID(), time: Date(), label: "Weekend", repeatDays: [.saturday, .sunday], challengeKind: [], isEnabled: false, soundId: "tone01", volume: 0.8)
-        ]
+    vm.alarms = [
+        Alarm(id: UUID(), time: Date(), label: "Morning", repeatDays: [.monday], challengeKind: [], isEnabled: true, soundId: "chimes01", volume: 0.5),
+        Alarm(id: UUID(), time: Date(), label: "Work", repeatDays: [], challengeKind: [.math], isEnabled: true, soundId: "bells01", volume: 0.7),
+        Alarm(id: UUID(), time: Date(), label: "Weekend", repeatDays: [.saturday, .sunday], challengeKind: [], isEnabled: false, soundId: "tone01", volume: 0.8)
+    ]
 
-        return vm
-    }())
-    .environmentObject(AppRouter())
+    return AlarmsListView(preConfiguredVM: vm, container: container)
+        .environmentObject(AppRouter())
+        .environment(\.container, container)
 }
 

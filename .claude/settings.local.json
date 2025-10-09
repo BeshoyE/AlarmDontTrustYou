@@ -28,7 +28,11 @@
       "Bash(tee:*)",
       "Bash(pkill:*)",
       "Read(//var/folders/2z/sz_w33_560x_7wj1qbyd_lbr0000gn/T/TemporaryItems/NSIRD_screencaptureui_aSGTdn/**)",
-      "Bash(xcrun simctl list:*)"
+      "Bash(xcrun simctl list:*)",
+      "Bash(afinfo:*)",
+      "Bash(awk:*)",
+      "Read(//System/Library/Audio/**)",
+      "WebSearch"
     ],
     "deny": [],
     "ask": []

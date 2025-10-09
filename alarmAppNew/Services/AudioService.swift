@@ -60,16 +60,20 @@ class AudioService: NSObject, AudioServiceProtocol {
     // MARK: - Audio Session Management
 
     func activatePlaybackSession() throws {
-        guard !isSessionActive else { return }
+        guard !isSessionActive else {
+            print("🔊 AudioService: Session already active, skipping activation")
+            return
+        }
 
         let audioSession = AVAudioSession.sharedInstance()
         // Use .playback without .defaultToSpeaker (not compatible)
         // The system will route to speaker by default for alarm sounds
-        try audioSession.setCategory(.playback, options: [])
+        try audioSession.setCategory(.playback, mode: .default, options: [])
         try audioSession.setActive(true)
         isSessionActive = true
 
-        print("AudioService: Activated playback session with .playback category")
+        print("🔊 AudioService: Setting category: playback, mode: default")
+        print("🔊 AudioService: Audio session activated: true")
     }
 
     func deactivateSession() throws {
@@ -213,14 +217,21 @@ class AudioService: NSObject, AudioServiceProtocol {
 
             // Create and configure audio player
             audioPlayer = try AVAudioPlayer(contentsOf: url)
-            audioPlayer?.volume = Float(max(0.0, min(1.0, volume)))
+            let clampedVolume = Float(max(0.0, min(1.0, volume)))
+            audioPlayer?.volume = clampedVolume
             audioPlayer?.numberOfLoops = loop ? -1 : 0  // -1 for infinite loop
 
             // Play the sound
-            audioPlayer?.play()
+            let didStart = audioPlayer?.play() ?? false
+
+            if didStart {
+                print("🔊 AudioService: Audio player started (rate: \(audioPlayer?.rate ?? 0.0), volume: \(clampedVolume))")
+            } else {
+                print("❌ AudioService: Audio player failed to start")
+            }
 
         } catch {
-            print("AudioService: Failed to play sound at \(url): \(error)")
+            print("❌ AudioService: Failed to play sound at \(url): \(error)")
         }
     }
     

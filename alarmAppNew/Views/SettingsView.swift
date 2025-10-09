@@ -11,8 +11,7 @@ struct SettingsView: View {
     @ObservedObject private var settingsService: SettingsService
     @Environment(\.dismiss) private var dismiss
 
-    init() {
-        let container = DependencyContainer.shared
+    init(container: DependencyContainer) {
         self.settingsService = container.settingsServiceConcrete
     }
 
@@ -112,5 +111,6 @@ struct SettingsView: View {
 // MARK: - Preview
 
 #Preview {
-    SettingsView()
+    let container = DependencyContainer()
+    return SettingsView(container: container)
 }

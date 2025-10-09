@@ -69,6 +69,7 @@ protocol SettingsServiceProtocol: ReliabilityModeProvider {
     var alertIntervalsSec: [Int] { get }
     var suppressForegroundSound: Bool { get }
     var leadInSec: Int { get }
+    var foregroundAlarmBoost: Double { get }
     var audioPolicy: AudioPolicy { get }
 
     func setReliabilityMode(_ mode: ReliabilityMode)
@@ -77,6 +78,7 @@ protocol SettingsServiceProtocol: ReliabilityModeProvider {
     func setAlertIntervals(_ intervals: [Int]) throws
     func setSuppressForegroundSound(_ enabled: Bool)
     func setLeadInSec(_ seconds: Int) throws
+    func setForegroundAlarmBoost(_ boost: Double)
     func resetToDefaults()
 }
 
@@ -94,6 +96,7 @@ final class SettingsService: SettingsServiceProtocol, ObservableObject {
         static let alertIntervalsSec = "com.alarmApp.alertIntervalsSec"
         static let suppressForegroundSound = "com.alarmApp.suppressForegroundSound"
         static let leadInSec = "com.alarmApp.leadInSec"
+        static let foregroundAlarmBoost = "com.alarmApp.foregroundAlarmBoost"
     }
 
     // MARK: - Published Properties
@@ -104,6 +107,7 @@ final class SettingsService: SettingsServiceProtocol, ObservableObject {
     @Published private(set) var alertIntervalsSec: [Int] = [0, 10, 20]
     @Published private(set) var suppressForegroundSound: Bool = true
     @Published private(set) var leadInSec: Int = 2
+    @Published private(set) var foregroundAlarmBoost: Double = 1.0  // Range: 0.8-1.5
 
     // MARK: - Dependencies
 
@@ -241,6 +245,21 @@ final class SettingsService: SettingsServiceProtocol, ObservableObject {
         print("🔧 SettingsService: ✅ Lead-in seconds changed to: \(seconds)")
     }
 
+    func setForegroundAlarmBoost(_ boost: Double) {
+        // Clamp to valid range: 0.8-1.5
+        let clampedBoost = max(0.8, min(1.5, boost))
+
+        guard foregroundAlarmBoost != clampedBoost else {
+            print("🔧 SettingsService: Foreground alarm boost already set to \(clampedBoost) - ignoring")
+            return
+        }
+
+        print("🔧 SettingsService: Changing foreground alarm boost: \(foregroundAlarmBoost) → \(clampedBoost)")
+        foregroundAlarmBoost = clampedBoost
+        userDefaults.set(clampedBoost, forKey: Keys.foregroundAlarmBoost)
+        print("🔧 SettingsService: ✅ Foreground alarm boost changed to: \(clampedBoost)")
+    }
+
     func resetToDefaults() {
         print("🔧 SettingsService: Resetting to defaults")
         setReliabilityMode(.notificationsOnly)
@@ -249,6 +268,7 @@ final class SettingsService: SettingsServiceProtocol, ObservableObject {
         try? setAlertIntervals([0, 10, 20])
         setSuppressForegroundSound(true)
         try? setLeadInSec(2)
+        setForegroundAlarmBoost(1.0)
     }
 
     // MARK: - Private Methods
@@ -323,6 +343,17 @@ final class SettingsService: SettingsServiceProtocol, ObservableObject {
             leadInSec = userDefaults.integer(forKey: Keys.leadInSec)
             print("🔧 SettingsService: Loaded lead-in seconds: \(leadInSec)")
         }
+
+        // Load foregroundAlarmBoost (default: 1.0, range: 0.8-1.5)
+        if userDefaults.object(forKey: Keys.foregroundAlarmBoost) == nil {
+            foregroundAlarmBoost = 1.0
+            userDefaults.set(1.0, forKey: Keys.foregroundAlarmBoost)
+            print("🔧 SettingsService: Using default foreground alarm boost: 1.0")
+        } else {
+            let persistedBoost = userDefaults.double(forKey: Keys.foregroundAlarmBoost)
+            foregroundAlarmBoost = max(0.8, min(1.5, persistedBoost))  // Clamp to valid range
+            print("🔧 SettingsService: Loaded foreground alarm boost: \(foregroundAlarmBoost)")
+        }
     }
 }
 
@@ -337,6 +368,7 @@ final class MockSettingsService: SettingsServiceProtocol {
     @Published var alertIntervalsSec: [Int] = [0, 10, 20]
     @Published var suppressForegroundSound: Bool = true
     @Published var leadInSec: Int = 2
+    @Published var foregroundAlarmBoost: Double = 1.0
     private let subject = CurrentValueSubject<ReliabilityMode, Never>(.notificationsOnly)
 
     var modePublisher: AnyPublisher<ReliabilityMode, Never> {
@@ -383,6 +415,10 @@ final class MockSettingsService: SettingsServiceProtocol {
         leadInSec = seconds
     }
 
+    func setForegroundAlarmBoost(_ boost: Double) {
+        foregroundAlarmBoost = max(0.8, min(1.5, boost))
+    }
+
     func resetToDefaults() {
         setReliabilityMode(.notificationsOnly)
         setUseChainedScheduling(true)
@@ -390,6 +426,7 @@ final class MockSettingsService: SettingsServiceProtocol {
         try? setAlertIntervals([0, 10, 20])
         setSuppressForegroundSound(true)
         try? setLeadInSec(2)
+        setForegroundAlarmBoost(1.0)
     }
 }
 #endif

@@ -14,6 +14,15 @@ struct AlarmFormView: View {
  @State private var isTestingSoundNotification = false
  let onSave: () -> Void
 
+ // Inject container for accessing services
+ private let container: DependencyContainer
+
+ init(detailVM: AlarmDetailViewModel, container: DependencyContainer, onSave: @escaping () -> Void) {
+     self.detailVM = detailVM
+     self.container = container
+     self.onSave = onSave
+ }
+
  var body: some View {
    NavigationStack {
      Form {
@@ -39,7 +48,7 @@ struct AlarmFormView: View {
        Section(header: Text("Sound")) {
          // Sound Picker - Use SoundCatalog for consistency with alarm model
          Picker("Sound", selection: detailVM.soundIdBinding) {
-           ForEach(DependencyContainer.shared.soundCatalog.all, id: \.id) { sound in
+           ForEach(container.soundCatalog.all, id: \.id) { sound in
              Text(sound.name).tag(sound.id)
            }
          }
@@ -96,6 +105,23 @@ struct AlarmFormView: View {
          .buttonStyle(.plain)
          .foregroundColor(isTestingSoundNotification ? .secondary : .accentColor)
          .disabled(isTestingSoundNotification)
+
+         // Education banner about ringer vs media volume
+         VStack(alignment: .leading, spacing: 8) {
+           HStack {
+             Image(systemName: "info.circle")
+               .foregroundColor(.blue)
+             Text("Volume Settings")
+               .font(.caption)
+               .fontWeight(.medium)
+               .foregroundColor(.blue)
+           }
+
+           Text(AudioUXPolicy.educationCopy)
+             .font(.caption2)
+             .foregroundColor(.secondary)
+         }
+         .padding(.vertical, 4)
        }
 
        Section(header: Text("Challenges")) {
@@ -149,7 +175,7 @@ struct AlarmFormView: View {
        }
      }
      .navigationDestination(isPresented: $isAddingChallenge) {
-       ChallengeSelectionView(draft: $detailVM.draft)
+       ChallengeSelectionView(draft: $detailVM.draft, container: container)
      }
      .sheet(isPresented: $showQRScanner) {
          QRScannerView(
@@ -160,7 +186,7 @@ struct AlarmFormView: View {
                  detailVM.draft.expectedQR = scannedCode
                  showQRScanner = false
              },
-             permissionService: DependencyContainer.shared.permissionService
+             permissionService: container.permissionService
          )
      }
    }
@@ -171,7 +197,7 @@ struct AlarmFormView: View {
 
   private func previewCurrentSound() {
     Task {
-      await DependencyContainer.shared.audioService.preview(
+      await container.audioService.preview(
         soundName: detailVM.draft.soundName,
         volume: detailVM.draft.volume
       )
@@ -190,7 +216,7 @@ struct AlarmFormView: View {
       }
 
       do {
-        try await DependencyContainer.shared.notificationService.scheduleTestNotification(
+        try await container.notificationService.scheduleTestNotification(
           soundName: detailVM.draft.soundName,
           in: 5.0
         )

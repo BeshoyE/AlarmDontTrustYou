@@ -16,9 +16,9 @@ class E2E_AlarmDismissalFlowTests: XCTestCase {
     
     override func setUp() {
         super.setUp()
-        
-        // Use real dependency container but with test clock
-        dependencyContainer = DependencyContainer.shared
+
+        // Create owned dependency container instance for testing
+        dependencyContainer = DependencyContainer()
         mockClock = TestClock()
     }
     

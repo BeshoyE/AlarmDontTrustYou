@@ -13,7 +13,8 @@ import UserNotifications
 struct alarmAppNewApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
-    private let dependencyContainer = DependencyContainer.shared
+    // OWNED instance - no singleton
+    private let dependencyContainer = DependencyContainer()
 
     init() {
         // CRITICAL: Ensure notification delegate is set immediately at app launch
@@ -28,7 +29,7 @@ struct alarmAppNewApp: App {
         WindowGroup {
             ContentView()              // we'll repurpose ContentView as the Root
                 .environmentObject(dependencyContainer.appRouter)
-                .environmentObject(dependencyContainer)
+                .environment(\.container, dependencyContainer)  // Inject via environment
         }
         .onChange(of: scenePhase) { oldPhase, newPhase in
             handleScenePhaseChange(newPhase)

@@ -13,6 +13,14 @@ struct ChallengeSelectionView: View {
   @Environment(\.dismiss) private var dismiss
   @State private var showingQRScanner = false
 
+  // Inject container for accessing services
+  private let container: DependencyContainer
+
+  init(draft: Binding<Alarm>, container: DependencyContainer) {
+      self._draft = draft
+      self.container = container
+  }
+
   var body: some View {
     NavigationStack{
       List{
@@ -58,7 +66,7 @@ struct ChallengeSelectionView: View {
           showingQRScanner = false
           dismiss()
         },
-        permissionService: DependencyContainer.shared.permissionService
+        permissionService: container.permissionService
       )
     }
 
@@ -79,7 +87,8 @@ struct ChallengeSelectionView: View {
 }
 
 #Preview {
-    ChallengeSelectionView(
+    let container = DependencyContainer()
+    return ChallengeSelectionView(
         draft: .constant(Alarm(
             id: UUID(),
             time: Date(),
@@ -90,6 +99,7 @@ struct ChallengeSelectionView: View {
             isEnabled: true,
             soundId: "chimes01",
             volume: 0.8
-        ))
+        )),
+        container: container
     )
 }

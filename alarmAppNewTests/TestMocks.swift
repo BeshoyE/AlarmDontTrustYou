@@ -99,6 +99,8 @@ final class MockNotificationService: NotificationScheduling {
         return []
     }
 
+    func scheduleAlarmImmediately(_ alarm: Alarm) async throws {}
+
     func scheduleTestNotification(soundName: String?, in seconds: TimeInterval) async throws {}
     func scheduleTestSystemDefault() async throws {}
     func scheduleTestCriticalSound() async throws {}
@@ -113,6 +115,7 @@ final class MockNotificationService: NotificationScheduling {
     func scheduleBareDefaultTest() async throws {}
     func scheduleBareDefaultTestNoInterruption() async throws {}
     func scheduleBareDefaultTestNoCategory() async throws {}
+    func scheduleOneOffTestAlarm(leadTime: TimeInterval) async throws {}
 }
 
 // MARK: - Alarm Storage Mock
@@ -517,6 +520,16 @@ final class MockSettingsService: SettingsServiceProtocol {
 
     func setReliabilityMode(_ mode: ReliabilityMode) {
         reliabilityMode = mode
+    }
+}
+
+// MARK: - System Volume Provider Mock
+
+final class MockSystemVolumeProvider: SystemVolumeProviding {
+    var mockVolume: Float = 0.5
+
+    func currentMediaVolume() -> Float {
+        return mockVolume
     }
 }
 

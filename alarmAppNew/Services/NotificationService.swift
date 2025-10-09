@@ -12,9 +12,13 @@ import os.log
 
 // MARK: - App Lifecycle Tracking
 
-@MainActor
-protocol AppLifecycleTracking {
+// Protocol for dependency injection (Infrastructure boundary)
+public protocol LifecycleReadable {
   var isActive: Bool { get }
+}
+
+@MainActor
+protocol AppLifecycleTracking: LifecycleReadable {
   func startTracking()
   func stopTracking()
 }
@@ -122,6 +126,11 @@ protocol NotificationScheduling {
   func scheduleBareDefaultTestNoInterruption() async throws
   func scheduleBareDefaultTestNoCategory() async throws
 
+  // Lock-Screen Test for Volume Check
+  /// Schedules a one-off test alarm to verify lock-screen sound volume
+  /// - Parameter leadTime: Time in seconds before the notification fires (default: 8)
+  func scheduleOneOffTestAlarm(leadTime: TimeInterval) async throws
+
   // Background Audio Scheduling - removed, handled by DismissalFlow at fire time
 
   // MARK: - Occurrence Cleanup (Post-Dismissal)
@@ -184,6 +193,8 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
   private let audioEngine: AlarmAudioEngineProtocol
   private let dismissedRegistry: DismissedRegistry
   private let chainSettingsProvider: ChainSettingsProviding
+  private let activeAlarmPolicy: ActiveAlarmPolicyProviding
+  private let lifecycle: LifecycleReadable
 
   init(
     permissionService: PermissionServiceProtocol,
@@ -195,7 +206,9 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
     settingsService: SettingsServiceProtocol,
     audioEngine: AlarmAudioEngineProtocol,
     dismissedRegistry: DismissedRegistry,
-    chainSettingsProvider: ChainSettingsProviding = DefaultChainSettingsProvider()
+    chainSettingsProvider: ChainSettingsProviding = DefaultChainSettingsProvider(),
+    activeAlarmPolicy: ActiveAlarmPolicyProviding,
+    lifecycle: LifecycleReadable
   ) {
     self.permissionService = permissionService
     self.appStateProvider = appStateProvider
@@ -207,6 +220,8 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
     self.audioEngine = audioEngine
     self.dismissedRegistry = dismissedRegistry
     self.chainSettingsProvider = chainSettingsProvider
+    self.activeAlarmPolicy = activeAlarmPolicy
+    self.lifecycle = lifecycle
     super.init()
   }
 
@@ -691,28 +706,27 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
           print("⚠️ Foreground Assist: Failed to play AV audio -", error)
           // Continue with notification sound as fallback
         }
-      } else if settingsService.suppressForegroundSound && UIApplication.shared.applicationState == .active {
-        print("🔔 Foreground Assist: Suppressing foreground sound (setting enabled)")
       }
 
-      // Smart sound suppression: suppress notification sound ONLY if audio engine is actively ringing
-      // SINGLE SOURCE: Only check audioEngine.isActivelyRinging (engine handles policy internally)
-      let audioRinging: Bool = audioEngine.isActivelyRinging
-      let suppressSetting: Bool = settingsService.suppressForegroundSound
-      let shouldSuppressSound = audioRinging && suppressSetting
+      // Suppress OS notification sound when app is foreground (app audio will play via DismissalFlow)
+      // Allow OS notification sound when app is background (lock screen) - plays at device ringer volume
+      let isAppForeground = lifecycle.isActive
+      let suppressSetting = settingsService.suppressForegroundSound
+      let shouldSuppressSound = isAppForeground && suppressSetting
 
       let options: UNNotificationPresentationOptions = shouldSuppressSound
-        ? [.banner, .list]              // Audio engine is providing sound
-        : [.banner, .list, .sound]      // Notifications provide sound
+        ? [.banner, .list]              // Foreground: app audio owns sound
+        : [.banner, .list, .sound]      // Background: OS notification plays
 
       // Extract values for type-checker performance
       let optsStr: String = String(describing: options)
       let capabilityStr: String = String(describing: policy.capability)
-      print("🔔 Real alarm detected - capability:", capabilityStr, "options:", optsStr)
 
-      #if DEBUG
-      print("🔍 [DIAG] willPresent - audioRinging:", audioRinging, "suppressSetting:", suppressSetting, "opts:", optsStr)
-      #endif
+      // Structured logging: policy decision
+      print("🔔 willPresent_policy_decision - isForeground:", isAppForeground,
+            "suppressSetting:", suppressSetting,
+            "opts:", options.rawValue,
+            "capability:", capabilityStr)
 
       completed = true
       completionHandler(options)
@@ -1139,7 +1153,50 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
     // Step 3: Compute diff
     let planned = allDesired.count
     let toAdd = allDesired.subtracting(ourPending)
-    let toRemove = ourPending.subtracting(allDesired)
+    let toRemoveRaw = ourPending.subtracting(allDesired)
+
+    // Step 3.5: Filter toRemove to protect active alarms (fix for canceling ringing alarms)
+    let now = Date()
+    var toRemove = Set<String>()
+    var protectedActive: [String] = []
+
+    for identifier in toRemoveRaw {
+      // Parse the occurrence date from the identifier
+      guard let occurrenceKey = OccurrenceKeyFormatter.parse(fromIdentifier: identifier),
+            let alarmId = OccurrenceKeyFormatter.parseAlarmId(from: identifier) else {
+        // If we can't parse, include in removal (likely legacy format)
+        toRemove.insert(identifier)
+        continue
+      }
+
+      // Compute the active window for this occurrence
+      let activeWindowSeconds = activeAlarmPolicy.activeWindowSeconds(for: alarmId, occurrenceKey: identifier)
+      let occurrenceDate = occurrenceKey.date
+      let activeUntil = occurrenceDate.addingTimeInterval(activeWindowSeconds)
+
+      // Check if we're currently within the active window
+      if now >= occurrenceDate && now <= activeUntil {
+        // This alarm is currently active - protect it from removal
+        protectedActive.append(identifier)
+        print("🛡️ refreshAll: Protected active occurrence \(identifier.prefix(50))... (now=\(now.ISO8601Format()), activeUntil=\(activeUntil.ISO8601Format()))")
+      } else {
+        // Outside active window - safe to remove
+        toRemove.insert(identifier)
+      }
+    }
+
+    // Log if we protected any active alarms
+    if !protectedActive.isEmpty {
+      reliabilityLogger.log(
+        .notificationsStatusChanged,
+        alarmId: nil,
+        details: [
+          "event": "refresh_all_protected_active_occurrence",
+          "protected_count": "\(protectedActive.count)",
+          "identifiers": protectedActive.prefix(5).joined(separator: ", ")
+        ]
+      )
+    }
 
     // Step 4: Apply changes atomically (remove then add)
     if !toRemove.isEmpty {
@@ -2145,6 +2202,54 @@ class NotificationService: NSObject, NotificationScheduling, UNUserNotificationC
     print("   • Rings: iOS settings fine → issue in main triage pipeline")
     print("   • Silent but banner shows: quiet delivery (provisional/Focus/Sounds off)")
     print("   • Nothing appears: authorization/scheduling issue")
+  }
+
+  /// Schedules a one-off test alarm to verify lock-screen sound volume
+  /// - Parameter leadTime: Time in seconds before the notification fires
+  func scheduleOneOffTestAlarm(leadTime: TimeInterval = 8) async throws {
+    let center = UNUserNotificationCenter.current()
+
+    // Request authorization if needed
+    let granted = try await center.requestAuthorization(options: [.alert, .badge, .sound])
+    guard granted else {
+      throw NSError(domain: "NotificationService", code: 401,
+                    userInfo: [NSLocalizedDescriptionKey: "Notification permission denied"])
+    }
+
+    // Create content with default sound and time-sensitive interruption
+    let content = UNMutableNotificationContent()
+    content.title = "🔔 Lock-Screen Test Alarm"
+    content.body = "This is a test to verify your ringer volume"
+    content.sound = .default
+    content.categoryIdentifier = Categories.alarm
+    content.userInfo = [
+      "alarmId": UUID().uuidString,
+      "type": "test_lock_screen",
+      "isTest": true
+    ]
+
+    if #available(iOS 15.0, *) {
+      content.interruptionLevel = .timeSensitive
+    }
+
+    // Schedule with time interval trigger
+    let trigger = UNTimeIntervalNotificationTrigger(timeInterval: leadTime, repeats: false)
+    let request = UNNotificationRequest(
+      identifier: "test-lock-screen-\(UUID().uuidString)",
+      content: content,
+      trigger: trigger
+    )
+
+    try await center.add(request)
+
+    // Log telemetry
+    reliabilityLogger.log(
+      .scheduled,
+      alarmId: UUID(), // Use temporary UUID for test alarms
+      details: ["type": "test_lock_screen", "leadTime": "\(leadTime)s"]
+    )
+
+    print("🟢 Scheduled lock-screen test alarm (fires in \(Int(leadTime))s)")
   }
 
   /// Phase 5: Category registration check

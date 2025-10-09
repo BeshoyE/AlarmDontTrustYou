@@ -11,7 +11,7 @@ struct DismissalFlowView: View {
     var body: some View {
         Group {
             if isSceneReady {
-                RingingView(alarmID: alarmID)
+                RingingView(alarmID: alarmID, container: container)
                     .onDisappear {
                         onFinish()
                     }

@@ -13,12 +13,10 @@ struct RingingView: View {
     let alarmID: UUID
     @StateObject private var viewModel: DismissalFlowViewModel
     @EnvironmentObject private var container: DependencyContainer
-    
-    init(alarmID: UUID) {
+
+    init(alarmID: UUID, container: DependencyContainer) {
         self.alarmID = alarmID
-        self._viewModel = StateObject(wrappedValue: {
-            DependencyContainer.shared.makeDismissalFlowViewModel()
-        }())
+        self._viewModel = StateObject(wrappedValue: container.makeDismissalFlowViewModel())
     }
     
     var body: some View {
@@ -296,6 +294,8 @@ private struct FailedContent: View {
 }
 
 #Preview {
-    RingingView(alarmID: UUID())
-        .environmentObject(DependencyContainer.shared)
+    let container = DependencyContainer()
+    return RingingView(alarmID: UUID(), container: container)
+        .environmentObject(container)
+        .environment(\.container, container)
 }

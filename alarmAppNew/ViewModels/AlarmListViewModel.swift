@@ -13,22 +13,26 @@ class AlarmListViewModel: ObservableObject {
   @Published var alarms: [Alarm] = []
   @Published var notificationPermissionDetails: NotificationPermissionDetails?
   @Published var showPermissionBlocking = false
-  
+  @Published var showMediaVolumeWarning = false
+
   private let storage: AlarmStorage
   private let permissionService: PermissionServiceProtocol
   private let notificationService: NotificationScheduling
   private let refresher: RefreshRequesting
+  private let systemVolumeProvider: SystemVolumeProviding
 
   init(
     storage: AlarmStorage,
     permissionService: PermissionServiceProtocol,
     notificationService: NotificationScheduling,
-    refresher: RefreshRequesting
+    refresher: RefreshRequesting,
+    systemVolumeProvider: SystemVolumeProviding
   ) {
     self.storage = storage
     self.permissionService = permissionService
     self.notificationService = notificationService
     self.refresher = refresher
+    self.systemVolumeProvider = systemVolumeProvider
 
     fetchAlarms()
     checkNotificationPermissions()
@@ -70,13 +74,18 @@ class AlarmListViewModel: ObservableObject {
 
   func toggle(_ alarm:Alarm) {
     guard let thisAlarm = alarms.firstIndex(where: {$0.id == alarm.id}) else { return }
-    
+
     // Data model guardrail: Don't allow enabling alarms without expectedQR (QR-only MVP)
     if !alarm.isEnabled && alarm.expectedQR == nil {
       errorMessage = "Cannot enable alarm: QR code required for dismissal"
       return
     }
-    
+
+    // Check media volume before enabling alarm
+    if !alarm.isEnabled {
+      checkMediaVolumeBeforeArming()
+    }
+
     alarms[thisAlarm].isEnabled.toggle()
     Task {
       await sync(alarms[thisAlarm])
@@ -182,5 +191,30 @@ class AlarmListViewModel: ObservableObject {
       }
   }
 
+  // MARK: - Volume Warning
 
+  /// Checks media volume and shows warning if below threshold
+  private func checkMediaVolumeBeforeArming() {
+    let currentVolume = systemVolumeProvider.currentMediaVolume()
+
+    if currentVolume < AudioUXPolicy.lowMediaVolumeThreshold {
+      showMediaVolumeWarning = true
+    } else {
+      showMediaVolumeWarning = false
+    }
+  }
+
+  /// Schedules a one-off test alarm to verify lock-screen sound volume
+  func testLockScreen() {
+    Task {
+      do {
+        try await notificationService.scheduleOneOffTestAlarm(
+          leadTime: AudioUXPolicy.testLeadSeconds
+        )
+        print("✅ Lock-screen test alarm scheduled (fires in \(Int(AudioUXPolicy.testLeadSeconds))s)")
+      } catch {
+        errorMessage = "Failed to schedule test alarm: \(error.localizedDescription)"
+      }
+    }
+  }
 }

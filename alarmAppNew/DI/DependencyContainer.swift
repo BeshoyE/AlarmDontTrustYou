@@ -15,8 +15,6 @@ import UIKit
 
 @MainActor
 class DependencyContainer: ObservableObject {
-    static let shared = DependencyContainer()
-
     // MARK: - Services
     let permissionService: PermissionServiceProtocol
     let persistenceService: AlarmStorage
@@ -42,6 +40,10 @@ class DependencyContainer: ObservableObject {
     private let chainedNotificationSchedulerConcrete: ChainedNotificationScheduler
     private let dismissedRegistryConcrete: DismissedRegistry
     private let refreshCoordinatorConcrete: RefreshCoordinator
+    private let activeAlarmPolicyConcrete: ActiveAlarmPolicyProvider
+    private let deliveredNotificationsReaderConcrete: DeliveredNotificationsReading
+    private let activeAlarmDetectorConcrete: ActiveAlarmDetector
+    private let systemVolumeProviderConcrete: SystemVolumeProviding
 
     // Public protocol exposure
     var notificationService: NotificationScheduling { notificationServiceConcrete }
@@ -52,10 +54,12 @@ class DependencyContainer: ObservableObject {
     var alarmFactory: AlarmFactory { alarmFactoryConcrete }
     var chainedNotificationScheduler: ChainedNotificationScheduling { chainedNotificationSchedulerConcrete }
     var chainSettingsProvider: ChainSettingsProviding { chainSettingsProviderConcrete }
+    var activeAlarmDetector: ActiveAlarmDetector { activeAlarmDetectorConcrete }
+    var systemVolumeProvider: SystemVolumeProviding { systemVolumeProviderConcrete }
 
     private var didActivateNotifications = false
 
-    private init() {
+    init() {
         // CRITICAL INITIALIZATION ORDER: Prevent dependency cycles
 
         // 1. Create SoundCatalog first (no dependencies)
@@ -86,6 +90,7 @@ class DependencyContainer: ObservableObject {
         self.chainPolicyConcrete = ChainPolicy(settings: chainSettings)
         self.globalLimitGuardConcrete = GlobalLimitGuard()
         self.dismissedRegistryConcrete = DismissedRegistry()
+        self.activeAlarmPolicyConcrete = ActiveAlarmPolicyProvider(chainPolicy: chainPolicyConcrete)
         self.chainedNotificationSchedulerConcrete = ChainedNotificationScheduler(
             soundCatalog: soundCatalogConcrete,
             notificationIndex: notificationIndexConcrete,
@@ -109,7 +114,9 @@ class DependencyContainer: ObservableObject {
             settingsService: settingsServiceConcrete,
             audioEngine: soundEngineConcrete,
             dismissedRegistry: dismissedRegistryConcrete,
-            chainSettingsProvider: chainSettingsProviderConcrete
+            chainSettingsProvider: chainSettingsProviderConcrete,
+            activeAlarmPolicy: activeAlarmPolicyConcrete,
+            lifecycle: appLifecycleTracker
         )
         self.qrScanningService = QRScanningService(permissionService: permissionService)
         self.audioService = AudioService()
@@ -117,7 +124,19 @@ class DependencyContainer: ObservableObject {
         // 8. Create RefreshCoordinator to coalesce refresh requests
         self.refreshCoordinatorConcrete = RefreshCoordinator(notificationService: notificationServiceConcrete)
 
-        // 9. Set up policy provider after all services are initialized
+        // 9. Create ActiveAlarmDetector for auto-routing to dismissal
+        self.deliveredNotificationsReaderConcrete = UNDeliveredNotificationsReader()
+        self.activeAlarmDetectorConcrete = ActiveAlarmDetector(
+            deliveredNotificationsReader: deliveredNotificationsReaderConcrete,
+            activeAlarmPolicy: activeAlarmPolicyConcrete,
+            dismissedRegistry: dismissedRegistryConcrete,
+            alarmStorage: persistenceService
+        )
+
+        // 10. Create SystemVolumeProvider (no dependencies)
+        self.systemVolumeProviderConcrete = SystemVolumeProvider()
+
+        // 11. Set up policy provider after all services are initialized
         soundEngineConcrete.setPolicyProvider { [weak self] in
             self?.settingsServiceConcrete.audioPolicy ?? AudioPolicy(capability: .foregroundAssist, allowRouteOverrideAtAlarm: true)
         }
@@ -176,7 +195,8 @@ class DependencyContainer: ObservableObject {
             storage: persistenceService,
             permissionService: permissionService,
             notificationService: notificationService,
-            refresher: refreshCoordinatorConcrete
+            refresher: refreshCoordinatorConcrete,
+            systemVolumeProvider: systemVolumeProviderConcrete
         )
     }
     

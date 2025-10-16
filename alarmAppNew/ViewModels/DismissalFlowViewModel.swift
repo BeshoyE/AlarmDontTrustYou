@@ -15,7 +15,7 @@ import AVFoundation
 final class DismissalFlowViewModel: ObservableObject {
     
     // MARK: - State Machine
-    
+
     enum State: Equatable {
         case idle
         case ringing
@@ -23,11 +23,22 @@ final class DismissalFlowViewModel: ObservableObject {
         case validating
         case success
         case failed(FailureReason)
-        
+
         var canRetry: Bool {
             if case .failed = self { return true }
             return false
         }
+    }
+
+    // MARK: - Phase for AlarmKit integration
+
+    enum Phase: Equatable {
+        case awaitingChallenge
+        case validating
+        case stopping
+        case snoozing
+        case success
+        case failed(String?)
     }
     
     enum FailureReason: Equatable {
@@ -36,7 +47,9 @@ final class DismissalFlowViewModel: ObservableObject {
         case permissionDenied
         case noExpectedQR
         case alarmNotFound
-        
+        case multipleAlarmsAlerting
+        case alarmEndedButChallengesIncomplete  // System auto-dismissed; challenges incomplete
+
         var displayMessage: String {
             switch self {
             case .qrMismatch:
@@ -49,30 +62,59 @@ final class DismissalFlowViewModel: ObservableObject {
                 return "No QR code configured for this alarm."
             case .alarmNotFound:
                 return "Alarm not found."
+            case .multipleAlarmsAlerting:
+                return "Multiple alarms detected. Please try again."
+            case .alarmEndedButChallengesIncomplete:
+                return "Alarm ended by system. Please complete challenges before dismissing."
             }
         }
     }
     
     // MARK: - Published State
-    
+
     @Published var state: State = .idle
+    @Published var phase: Phase = .awaitingChallenge
+    @Published var challengeProgress: (completed: Int, total: Int) = (0, 0)
     @Published var scanFeedbackMessage: String?
     @Published var isScreenAwake = false
-    
+
+    // MARK: - Computed Properties
+
+    /// Whether the alarm can be stopped (challenges are complete)
+    var canStopAlarm: Bool {
+        guard let alarm = alarmSnapshot else { return false }
+
+        let challengeState = ChallengeStackState(
+            requiredChallenges: alarm.challengeKind,
+            completedChallenges: hasCompletedQR ? [.qr] : []
+        )
+
+        return stopAllowed.execute(challengeState: challengeState)
+    }
+
+    /// Whether snooze is allowed (alarm is ringing, not in failed state)
+    var canSnooze: Bool {
+        return state == .ringing && !hasCompletedSuccess
+    }
+
     // MARK: - Dependencies (Protocol-based DI)
 
     private let qrScanning: QRScanning
-    private let notificationService: NotificationScheduling
-    private let alarmStorage: AlarmStorage
+    private let notificationService: AlarmScheduling  // Keep for legacy cleanup shim
+    private let alarmStorage: PersistenceStore
     private let clock: Clock
     private let appRouter: AppRouting
     private let permissionService: PermissionServiceProtocol
     private let reliabilityLogger: ReliabilityLogging
-    private let audioService: AudioServiceProtocol
     private let audioEngine: AlarmAudioEngineProtocol
     private let reliabilityModeProvider: ReliabilityModeProvider
     private let dismissedRegistry: DismissedRegistry
     private let settingsService: SettingsServiceProtocol
+    private let alarmScheduler: AlarmScheduling  // NEW: Unified scheduler
+    private let alarmRunStore: AlarmRunStore  // NEW: Actor-based run persistence
+    private let stopAllowed: StopAlarmAllowed.Type  // NEW: Injected use case
+    private let snoozeComputer: SnoozeAlarm.Type  // NEW: Injected use case
+    private let idleTimerController: IdleTimerControlling  // NEW: UIKit isolation
     
     // MARK: - Private State
 
@@ -83,34 +125,39 @@ final class DismissalFlowViewModel: ObservableObject {
     private var lastSuccessPayload: String?
     private var lastSuccessTime: Date?
     private var hasCompletedSuccess = false
+    private var hasCompletedQR = false  // Track QR completion for MVP
+    private var intentAlarmId: UUID?  // Optional ID from firing intent (for pre-migration alarms)
     
     // Atomic transition guards
     private var isTransitioning = false
     private let transitionQueue = DispatchQueue(label: "dismissal-flow-transitions", qos: .userInteractive)
     
     // MARK: - Callbacks (Separation of Concerns)
-    
+
     var onStateChange: ((State) -> Void)?
     var onRunLogged: ((AlarmRun) -> Void)?
-    var onRequestScreenAwake: ((Bool) -> Void)?
-    var onRequestAudioControl: ((Bool) -> Void)?
     var onRequestHaptics: (() -> Void)?
     
     // MARK: - Init
-    
+
     init(
         qrScanning: QRScanning,
-        notificationService: NotificationScheduling,
-        alarmStorage: AlarmStorage,
+        notificationService: AlarmScheduling,
+        alarmStorage: PersistenceStore,
         clock: Clock,
         appRouter: AppRouting,
         permissionService: PermissionServiceProtocol,
         reliabilityLogger: ReliabilityLogging,
-        audioService: AudioServiceProtocol,
         audioEngine: AlarmAudioEngineProtocol,
         reliabilityModeProvider: ReliabilityModeProvider,
         dismissedRegistry: DismissedRegistry,
-        settingsService: SettingsServiceProtocol
+        settingsService: SettingsServiceProtocol,
+        alarmScheduler: AlarmScheduling,
+        alarmRunStore: AlarmRunStore,  // NEW: Actor-based run persistence
+        idleTimerController: IdleTimerControlling,  // NEW: UIKit isolation
+        stopAllowed: StopAlarmAllowed.Type = StopAlarmAllowed.self,
+        snoozeComputer: SnoozeAlarm.Type = SnoozeAlarm.self,
+        intentAlarmId: UUID? = nil  // Optional ID from firing intent
     ) {
         self.qrScanning = qrScanning
         self.notificationService = notificationService
@@ -119,22 +166,32 @@ final class DismissalFlowViewModel: ObservableObject {
         self.appRouter = appRouter
         self.permissionService = permissionService
         self.reliabilityLogger = reliabilityLogger
-        self.audioService = audioService
         self.audioEngine = audioEngine
         self.reliabilityModeProvider = reliabilityModeProvider
         self.dismissedRegistry = dismissedRegistry
         self.settingsService = settingsService
+        self.alarmScheduler = alarmScheduler
+        self.alarmRunStore = alarmRunStore  // NEW
+        self.idleTimerController = idleTimerController  // NEW
+        self.stopAllowed = stopAllowed
+        self.snoozeComputer = snoozeComputer
+        self.intentAlarmId = intentAlarmId
     }
     
     // MARK: - Public Intents (All Idempotent)
-    
-    func start(alarmId: UUID) {
+
+    @MainActor
+    func onChallengeUpdate(completed: Int, total: Int) {
+        challengeProgress = (completed, total)
+    }
+
+    func start(alarmId: UUID) async {
         // Idempotent: ignore if not idle
         guard state == .idle else { return }
-        
+
         do {
             // Load alarm snapshot once
-            let alarm = try alarmStorage.alarm(with: alarmId)
+            let alarm = try await alarmStorage.alarm(with: alarmId)
             alarmSnapshot = alarm
             
             // Create run record
@@ -152,10 +209,10 @@ final class DismissalFlowViewModel: ObservableObject {
             
             // Transition to ringing
             setState(.ringing)
-            
+
             // Request UI effects
             isScreenAwake = true
-            onRequestScreenAwake?(true)
+            idleTimerController.setIdleTimer(disabled: true)
             onRequestHaptics?()
 
             // Start alarm sound - check reliability mode first
@@ -189,25 +246,27 @@ final class DismissalFlowViewModel: ObservableObject {
                         print("DismissalFlow: Enhanced mode - already ringing, ignoring start request")
                     }
                 } catch {
-                    print("DismissalFlow: Enhanced mode failed, falling back to audioService: \(error)")
-                    // Fallback to audioService if audioEngine fails
-                    Task {
-                        await audioService.startRinging(
-                            soundName: alarm.soundName,
-                            volume: alarm.volume,
-                            loop: true
-                        )
-                    }
+                    print("DismissalFlow: Enhanced mode audio engine failed: \(error)")
+                    // Log error but don't have fallback - audioEngine is the single source
+                    reliabilityLogger.log(
+                        .dismissFailQR,
+                        alarmId: alarm.id,
+                        details: ["error": "audio_engine_failed", "reason": error.localizedDescription]
+                    )
                 }
             } else {
                 // Standard mode: notifications-only (App Store safe)
-                // ALWAYS play foreground audio when dismissal view is visible
-                print("DismissalFlow: Standard mode - using audioService for foreground audio")
-                Task {
-                    await audioService.startRinging(
-                        soundName: alarm.soundName,
-                        volume: alarm.volume,
-                        loop: true
+                // Use audioEngine for foreground playback (no fallback needed)
+                do {
+                    let soundName = alarm.soundName ?? "ringtone1"
+                    try audioEngine.playForegroundAlarm(soundName: soundName)
+                    print("DismissalFlow: Standard mode - started foreground alarm via audioEngine")
+                } catch {
+                    print("DismissalFlow: Standard mode audio engine failed: \(error)")
+                    reliabilityLogger.log(
+                        .dismissFailQR,
+                        alarmId: alarm.id,
+                        details: ["error": "audio_engine_failed", "reason": error.localizedDescription]
                     )
                 }
             }
@@ -302,6 +361,8 @@ final class DismissalFlowViewModel: ObservableObject {
             // Success - with debounce check
             if shouldProcessSuccessPayload(payload) {
                 print("DismissalFlowViewModel: QR code match successful for alarm: \(alarm.id)")
+                hasCompletedQR = true
+                onChallengeUpdate(completed: 1, total: 1)  // MVP has only QR
                 reliabilityLogger.logDismissSuccess(alarm.id, method: "qr", details: ["payload_length": "\(trimmedPayload.count)"])
                 await completeSuccess()
             } else {
@@ -345,94 +406,167 @@ final class DismissalFlowViewModel: ObservableObject {
     }
     
     func completeSuccess() async {
-        // Atomic transition guard: prevent concurrent completion
+        // State guards at top
+        guard state == .validating else { return }
         guard !isTransitioning else { return }
+
+        // Check if challenges are satisfied using injected use case
+        let challengeState = ChallengeStackState(
+            requiredChallenges: alarmSnapshot?.challengeKind ?? [],
+            completedChallenges: hasCompletedQR ? [.qr] : []
+        )
+
+        // Use injected stopAllowed, not static
+        guard stopAllowed.execute(challengeState: challengeState) else {
+            phase = .failed("Complete all challenges first")
+            setState(.failed(.noExpectedQR))  // Transition UI on failure
+            return
+        }
+
+        guard let alarm = alarmSnapshot else {
+            phase = .failed("Alarm not found")
+            setState(.failed(.alarmNotFound))
+            return
+        }
+
+        phase = .stopping
         isTransitioning = true
 
-        // Idempotent: only complete once
-        guard !hasCompletedSuccess else {
+        // Track whether we should stop audio on cleanup
+        var shouldStopAppAudio = true
+
+        // ALWAYS-RUN CLEANUP: defer placed immediately after isTransitioning = true
+        // Runs on ALL exit paths (success, error, early return after this point)
+        defer {
+            // Conditionally stop app audio
+            // If system handled alarm but challenges incomplete, keep audio playing
+            if shouldStopAppAudio {
+                audioEngine.stop()
+            }
+
+            // Stop UI effects
+            idleTimerController.setIdleTimer(disabled: false)
+            isScreenAwake = false
+
+            // Stop scanner
+            stopScanTask()
+
+            // Clear transitioning flag
             isTransitioning = false
-            return
-        }
-        guard let alarm = alarmSnapshot else {
-            isTransitioning = false
-            return
         }
 
-        hasCompletedSuccess = true
+        do {
+            // Use AlarmScheduling protocol for stop with optional intent ID
+            try await alarmScheduler.stop(alarmId: alarm.id, intentAlarmId: intentAlarmId)
 
-        // Stop UI effects immediately
-        onRequestScreenAwake?(false)
-        isScreenAwake = false
+            // SUCCESS PATH: Only set completion flag after stop succeeds
+            hasCompletedSuccess = true
 
-        // Stop alarm sound
-        audioEngine.stop()
-        audioService.stopAndDeactivateSession()
+            // Clear intent ID after successful use to prevent stale references
+            intentAlarmId = nil
 
-        // Grace period to ensure audio session fully deactivates before next notification can fire
-        try? await Task.sleep(nanoseconds: AudioSessionConfig.deactivationGraceNs)
-
-        // Stop scanner
-        stopScanTask()
-
-        // CHUNK 3: Crash-resilient dismissal order
-        // 1. Mark dismissed FIRST (guards future notification taps if crash occurs)
-        if let key = occurrenceKey {
-            await dismissedRegistry.markDismissed(alarmId: alarm.id, occurrenceKey: key)
-            print("📋 DismissalFlow: Marked occurrence \(key.prefix(10))... as dismissed")
-        }
-
-        // 2. THEN clean up notifications (async OS call - safe to fail after marking)
-        // For one-time alarms: cancel all notifications and disable
-        // For repeating alarms: clean up only this occurrence's notifications
-        if alarm.repeatDays.isEmpty {
-            // One-time alarm: cancel all notifications
-            await notificationService.cancelAlarm(alarm)
-
-            // Disable the alarm so it doesn't get rescheduled
-            var updatedAlarm = alarm
-            updatedAlarm.isEnabled = false
-            try? alarmStorage.saveAlarms([updatedAlarm])
-            print("DismissalFlow: One-time alarm dismissed and disabled")
-        } else {
-            // Repeating alarm: clean up only this occurrence (removes pending + delivered)
+            // Legacy cleanup shim (no-op on AlarmKit)
             if let key = occurrenceKey {
-                await notificationService.cleanupAfterDismiss(alarmId: alarm.id, occurrenceKey: key)
-                print("DismissalFlow: Repeating alarm - cleaned up occurrence \(key.prefix(10))..., keeping future occurrences")
+                await notificationService.cleanupAfterDismiss(
+                    alarmId: alarm.id,
+                    occurrenceKey: key
+                )
+                print("DismissalFlow: Cleaned up occurrence \(key.prefix(10))...")
+            }
+
+            // Mark dismissed in registry
+            if let key = occurrenceKey {
+                await dismissedRegistry.markDismissed(alarmId: alarm.id, occurrenceKey: key)
+            }
+
+            // Complete alarm run with success
+            if var run = currentAlarmRun {
+                run.dismissedAt = clock.now()
+                run.outcome = .success
+
+                do {
+                    try await alarmRunStore.appendRun(run)  // NEW: async actor call
+                    onRunLogged?(run)
+                } catch {
+                    print("Failed to persist successful alarm run: \(error)")
+                }
+            }
+
+            // For one-time alarms: disable
+            if alarm.repeatDays.isEmpty {
+                var updatedAlarm = alarm
+                updatedAlarm.isEnabled = false
+                try? await alarmStorage.saveAlarms([updatedAlarm])
+                print("DismissalFlow: One-time alarm dismissed and disabled")
+            }
+
+            reliabilityLogger.log(
+                .dismissSuccess,
+                alarmId: alarm.id,
+                details: ["method": "challenges_completed"]
+            )
+
+            // Drive UI to success state
+            phase = .success
+            setState(.success)
+
+            // Direct route back (no unnecessary delay)
+            appRouter.backToList()
+
+        } catch {
+            // Handle protocol-typed AlarmSchedulingError
+            if let schedulingError = error as? AlarmSchedulingError {
+                // Structured logging with domain error type
+                reliabilityLogger.log(
+                    .stopFailed,
+                    alarmId: alarm.id,
+                    details: [
+                        "error": schedulingError.description,
+                        "error_type": "\(schedulingError)"
+                    ]
+                )
+
+                switch schedulingError {
+                case .alreadyHandledBySystem:
+                    // CRITICAL: System auto-dismissed alarm BUT challenges are INCOMPLETE
+                    // Keep app audio playing; user must complete challenges to silence
+                    shouldStopAppAudio = false  // Prevent audio stop in defer block
+                    print("DismissalFlow: [METRIC] event=alarm_system_handled_challenges_incomplete alarm_id=\(alarm.id) audio_preserved=true")
+                    setState(.failed(.alarmEndedButChallengesIncomplete))
+                    phase = .failed("System handled alarm but challenges incomplete")
+
+                case .ambiguousAlarmState:
+                    // Multiple alarms alerting - safe error for user
+                    print("DismissalFlow: [METRIC] event=multiple_alarms_alerting alarm_id=\(alarm.id)")
+                    setState(.failed(.multipleAlarmsAlerting))
+                    phase = .failed("Multiple alarms detected")
+
+                case .alarmNotFound:
+                    // Alarm disappeared (unexpected)
+                    print("DismissalFlow: [METRIC] event=alarm_not_found alarm_id=\(alarm.id)")
+                    setState(.failed(.alarmNotFound))
+                    phase = .failed("Alarm not found")
+
+                default:
+                    // Other scheduling errors
+                    print("DismissalFlow: [METRIC] event=stop_failed error=\(schedulingError) alarm_id=\(alarm.id)")
+                    setState(.failed(.alarmNotFound))
+                    phase = .failed("Couldn't stop alarm")
+                }
             } else {
-                // Fallback: cancel all if occurrenceKey missing (shouldn't happen)
-                print("⚠️ DismissalFlow: Missing occurrenceKey, falling back to full cancel")
-                await notificationService.cancelAlarm(alarm)
+                // Generic/unexpected error
+                reliabilityLogger.log(
+                    .stopFailed,
+                    alarmId: alarm.id,
+                    details: ["error": error.localizedDescription]
+                )
+                print("DismissalFlow: [METRIC] event=stop_failed_unexpected error=\(error.localizedDescription) alarm_id=\(alarm.id)")
+                setState(.failed(.alarmNotFound))
+                phase = .failed("Couldn't stop alarm")
             }
-        }
 
-        // Complete alarm run with success
-        if var run = currentAlarmRun {
-            run.dismissedAt = clock.now()
-            run.outcome = .success
-            
-            do {
-                try alarmStorage.appendRun(run)
-                onRunLogged?(run)
-            } catch {
-                print("Failed to persist successful alarm run: \(error)")
-            }
-        }
-        
-        // Background audio stopped via audioEngine.stop() above
-
-        // Transition to success
-        setState(.success)
-        isTransitioning = false
-        
-        // Brief dwell, then route back
-        Task {
-            try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5 seconds
-            await MainActor.run {
-                // Final guard before navigation
-                guard state == .success else { return }
-                appRouter.backToList()
-            }
+            // hasCompletedSuccess remains false, allowing retry
+            // defer handles all cleanup automatically (audio stop, scanner stop, flags cleared)
         }
     }
     
@@ -444,78 +578,103 @@ final class DismissalFlowViewModel: ObservableObject {
         guard !isTransitioning else { return }
 
         // Stop UI effects
-        onRequestScreenAwake?(false)
+        idleTimerController.setIdleTimer(disabled: false)
         isScreenAwake = false
 
         // Stop alarm sound
         audioEngine.stop()
-        audioService.stopAndDeactivateSession()
-
-        // Background audio stopped via audioEngine.stop() above
 
         // Stop scanner
         stopScanTask()
-        
+
         // Log failed run
         if let run = currentAlarmRun {
-            do {
-                try alarmStorage.appendRun(run) // Already defaults to .fail
-                onRunLogged?(run)
-            } catch {
-                print("Failed to persist failed alarm run: \(error)")
+            Task {
+                do {
+                    try await alarmRunStore.appendRun(run)  // NEW: async actor call
+                    await MainActor.run {
+                        onRunLogged?(run)
+                    }
+                } catch {
+                    print("Failed to persist failed alarm run: \(error)")
+                }
             }
         }
-        
+
         // Don't cancel follow-ups - let re-alerting continue
-        
+
         appRouter.backToList()
     }
     
-    func snooze() {
+    @MainActor
+    func stopAlarm() async {
+        // Explicit stop action (same as completeSuccess, but can be called directly)
+        await completeSuccess()
+    }
+
+    @MainActor
+    func snooze(requestedDuration: TimeInterval = 300) async {
         guard let alarm = alarmSnapshot else { return }
-        
-        // Atomic guard: prevent concurrent snooze
         guard !hasCompletedSuccess else { return }
         guard !isTransitioning else { return }
-        
-        // Stop UI effects
-        onRequestScreenAwake?(false)
-        isScreenAwake = false
 
-        // Stop alarm sound
-        audioEngine.stop()
-        audioService.stopAndDeactivateSession()
+        phase = .snoozing
 
-        // Stop scanner
-        stopScanTask()
+        // Use injected snoozeComputer, not static
+        let nextFireTime = snoozeComputer.execute(
+            alarm: alarm,
+            now: clock.now(),  // Use injected clock
+            requestedSnooze: requestedDuration,
+            bounds: SnoozeBounds.default  // From Domain
+        )
 
-        // Cancel current notifications and schedule snooze
-        Task {
-            // Cancel nudges but keep main alarm pattern for snooze
-            notificationService.cancelSpecificNotifications(
-                for: alarm.id,
-                types: [.nudge1, .nudge2, .nudge3]
+        let duration = max(1, nextFireTime.timeIntervalSince(clock.now()))
+
+        do {
+            // Use AlarmScheduling for countdown/snooze
+            try await alarmScheduler.transitionToCountdown(
+                alarmId: alarm.id,
+                duration: duration
             )
 
-            let snoozeTime = clock.now().addingTimeInterval(5 * 60) // 5 minutes
-            var snoozeAlarm = alarm
-            snoozeAlarm.time = snoozeTime
-            
-            do {
-                try await notificationService.scheduleAlarm(snoozeAlarm)
-            } catch {
-                print("Failed to schedule snooze: \(error)")
-            }
+            // Stop current ringing
+            audioEngine.stop()
+
+            // Stop UI effects
+            idleTimerController.setIdleTimer(disabled: false)
+            isScreenAwake = false
+
+            // Stop scanner
+            stopScanTask()
+
+            reliabilityLogger.log(
+                .snoozeSet,
+                alarmId: alarm.id,
+                details: ["duration": "\(Int(duration))"]
+            )
+
+            appRouter.backToList()
+        } catch {
+            reliabilityLogger.log(
+                .snoozeFailed,
+                alarmId: alarm.id,
+                details: ["error": error.localizedDescription]
+            )
+            phase = .failed("Couldn't snooze")
         }
-        
-        // Don't append run for snooze in MVP1
-        
-        appRouter.backToList()
     }
     
     func retry() {
         guard state.canRetry else { return }
+
+        // Reset all completion flags to allow new attempt
+        hasCompletedSuccess = false
+        hasCompletedQR = false
+
+        // Clear any stale feedback
         scanFeedbackMessage = nil
+
+        // Reset to ringing state
         setState(.ringing)
     }
     
@@ -567,13 +726,12 @@ final class DismissalFlowViewModel: ObservableObject {
   func cleanup() {
     stopScanTask()
 
-    onRequestScreenAwake?(false)
+    idleTimerController.setIdleTimer(disabled: false)
     isScreenAwake = false
     scanFeedbackMessage = nil
 
     // Stop alarm sound
     audioEngine.stop()
-    audioService.stopAndDeactivateSession()
   }
 
     deinit {

@@ -12,9 +12,9 @@ import Foundation
 public actor RefreshCoordinator {
     private var currentRefreshTask: Task<Void, Never>?
     private var isSchedulingInProgress = false
-    private let notificationService: NotificationScheduling
+    private let notificationService: AlarmScheduling
 
-    init(notificationService: NotificationScheduling) {
+    init(notificationService: AlarmScheduling) {
         self.notificationService = notificationService
     }
 

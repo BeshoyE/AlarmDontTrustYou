@@ -15,13 +15,13 @@ public final class ActiveAlarmDetector {
     private let deliveredNotificationsReader: DeliveredNotificationsReading
     private let activeAlarmPolicy: ActiveAlarmPolicyProviding
     private let dismissedRegistry: DismissedRegistry
-    private let alarmStorage: AlarmStorage
+    private let alarmStorage: PersistenceStore
 
     init(
         deliveredNotificationsReader: DeliveredNotificationsReading,
         activeAlarmPolicy: ActiveAlarmPolicyProviding,
         dismissedRegistry: DismissedRegistry,
-        alarmStorage: AlarmStorage
+        alarmStorage: PersistenceStore
     ) {
         self.deliveredNotificationsReader = deliveredNotificationsReader
         self.activeAlarmPolicy = activeAlarmPolicy
@@ -61,7 +61,7 @@ public final class ActiveAlarmDetector {
             if now >= occurrenceDate && now <= activeUntil {
                 // Found an active alarm! Load the full alarm object
                 do {
-                    let alarms = try alarmStorage.loadAlarms()
+                    let alarms = try await alarmStorage.loadAlarms()
                     if let alarm = alarms.first(where: { $0.id == alarmId }) {
                         print("✅ ActiveAlarmDetector: Found active alarm \(alarmId.uuidString.prefix(8)) at occurrence \(occurrenceKeyString)")
                         return (alarm, occurrenceKey)

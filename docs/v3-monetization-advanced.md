@@ -1,58 +1,64 @@
-# V3 — Monetization & Advanced Behavior
+# V3 — Monetization & Advanced Reliability
 
 ## 1. Goal
-Enable penalties, (optional) buddy payouts, Roulette Mode, and smart wake.
+
+Introduce advanced anti-cheat features, monetize value-added services, and ensure peak alarm reliability by leveraging OS health and sleep metrics. All new state must be managed with thread-safe **Swift actors**.
 
 ## 2. Scope (Include)
-- **Payments**: Stripe Customer + PaymentMethod; failure → debit; webhooks for final status.
-- **Payouts (optional)**: Stripe Connect Standard to buddy (feature-flagged).
-- **Roulette Mode**: randomly select pre-approved contact; templates; max/week; quiet hours; dry-run.
-- **Sleep Tracking**: HealthKit permission; 15–30 min smart wake window; choose lightest stage within window.
-- Analytics & flags for A/B across penalties and roulette.
+
+* **Monetization (MonetizationService Actor):** Subscription tiers for Advanced Features (Smart Wake, Roulette Mode); IAP for one-time purchases (e.g., sound packs).
+* **Roulette Mode:** Randomly selects a challenge from the user's *available* pool; uses a single source of truth for the random seed (managed by an actor).
+* **Advanced Reliability (HealthStatusProviding):** Leverage HealthKit/SleepKit data to monitor background status and inform the alarm system of optimal pre-wake times and potential device issues (e.g., Low Power Mode).
+* **Smart Wake:** Uses HealthKit data to trigger the alarm within a 30-minute window before the scheduled time, based on sleep phase (lightest sleep). Must be highly resilient and **never** trigger late.
+* **Accountability Escalation (V2-based):** Introduce "Penalty" logic for failed alarms (e.g., donate to charity, mandatory friend ping).
 
 ## 3. Out of Scope (This Version)
-- New social graphs; public timelines; community features.
+
+* Advanced backend-hosted analytics (defer to V4).
+* Non-subscription/IAP payment models (e.g., ads).
+* Advanced machine learning for predictive scheduling.
 
 ## 4. Definition of Done
-- All payment paths covered by webhook tests; no duplicate charges.
-- Roulette respects quiet hours + max/week; dry-run logs full trace.
-- Smart wake window adjusts fire time inside window ≥80% of nights with shared data.
 
-## 5. Flags (Turn On Gradually)
-| Flag      | Default | Notes                                        |
-|-----------|---------|----------------------------------------------|
-| payments  | on      | Stripe debit; kill-switch.                   |
-| payouts   | off     | If implemented via Stripe Connect.           |
-| roulette  | on      | With rate-limits + dry-run first.            |
-| smartWake | on      | HealthKit required; watch-first if needed.   |
-| buddy     | on      | From V2                                      |
-| proof     | on      | From V2                                      |
-| bedtime   | on      | From V2                                      |
+* Subscription status is managed by a thread-safe **MonetizationService actor**.
+* HealthKit permissions are requested with proper rationale; background query for sleep data runs reliably.
+* Smart Wake logic correctly identifies the wake window and triggers via `AlarmScheduling` if in light sleep.
+* Payment transactions complete and persist with integrity checks (managed by the **PersistenceStore actor**).
+* **Concurrency:** All monetization, smart wake data, and escalation logic **MUST** be implemented as **Swift `actor`** types (e.g., `MonetizationActor`, `RouletteStateActor`).
 
-## 6. Compliance/Safety
-- **App Store**: review policy for monetary penalties (IAP vs Stripe). Keep kill-switch and remote flags.
-- **SMS**: rate-limit, consent, quiet hours; opt-out keyword for buddies/roulette contacts.
-- **Health**: HealthKit privacy; explain use; allow revoke; minimize retention.
+## 5. Flags (Turn On)
 
-## 7. Backend/Plumbing Checklist
-- Stripe: customer setup, payment method attach, idempotent debits; webhooks `/webhooks/stripe`.
-- Optional Connect: buddy onboarding; payouts; 1099 handling (Stripe standard).
-- Roulette: seeded RNG; eligibility filter; template merge; Twilio send + status callbacks.
-- Data: `PenaltyRule`, `Payment`, `RouletteConfig`, `RoulettePick`, `SleepSession`.
-- Analytics: debit_{created|succeeded|failed}, roulette_{sent|blocked}, smartWake_fired.
+| Flag      | Default | Notes                                               |
+| --------- | ------- | --------------------------------------------------- |
+| buddy     | on      | V2 - Accountability                                 |
+| proof     | on      | V2 - Photo Proof                                    |
+| payments  | on      | IAP/Subscription enablement, managed by IAP/Sub Mgr |
+| roulette  | on      | Enable random challenge selection                   |
+| bedtime   | on      | V2 - Bedtime flow                                   |
+| smartWake | on      | Enable HealthKit-based wake window                  |
 
-## 8. Test Plan
-- Unit: roulette selector (seeded), rate-limit/max/week, quiet-hours filter.
-- Integration: Stripe sandbox debits + webhook retries/idempotency; Twilio status callbacks.
-- E2E: failure → debit → (optional) payout; failure → roulette send; smart-wake within window.
+## 6. Backend/Plumbing Checklist (UPDATED)
 
-## 9. AI Prompt Templates
-- Payments:
-  > Implement Stripe debit per **§2.6.3 Payments** and entities in **§2.3**. Add webhook handler with idempotency and retries; write integration tests.
-- Roulette:
-  > Build Roulette flow per **§2.6.4** using `RouletteConfig`/`RoulettePick`. Enforce quiet hours + max/week; provide dry-run that logs but doesn’t send SMS.
-- Smart Wake:
-  > Read HealthKit sleep; compute next fire time within a user-set window; prefer light stage; fall back to scheduled time if no data.
+* New endpoint: `POST /events/payment-receipt`.
+* Monetization provider abstraction (StoreKit/GooglePlay) added.
+* **Reliability:** `HealthStatusProviding` must be implemented in the Infrastructure layer and exposed via a protocol; all state must be read from/written to thread-safe actors.
+* **Persistence:** `PersistenceStore` actor must be extended to store subscription status, purchase history, and Smart Wake logs atomically.
 
-## 10. References
-- MVP Spec §2.1 (M2, M5, M4), §2.2 (Screens 7, 9, 10), §2.3, §2.6.3–2.6.4, §2.7, §2.8–2.10.
+## 7. Test Plan (UPDATED)
+
+* Unit: Smart Wake sleep phase detection logic; Roulette seed generation (must be deterministic in tests). **MonetizationService actor (load/save/update concurrency test).**
+* Integration: Mock HealthKit/SleepKit data feed; Mock StoreKit transactions.
+* E2E: (a) User with Smart Wake enabled wakes 15 minutes early; (b) User without subscription attempts to enable Roulette Mode (blocked).
+* **Concurrency Test (CRITICAL):** Simulate simultaneous update of a user's subscription status and a penalty event, ensuring the final user state remains consistent (no race conditions on shared data).
+
+## 8. AI Prompt Templates
+
+* Monetization Flow:
+
+    > Implement `MonetizationService`, ensuring it is a **Swift 'actor'**. Provide flows for checking subscription status and handling purchase transactions. Use typed domain errors (as per §5.5).
+* Smart Wake Core:
+
+    > Implement `HealthStatusProviding` protocol in Infrastructure (wraps HealthKit). Build Smart Wake Use Case logic in Domain to calculate the optimal wake time within a 30-minute window, using time-of-day data from **AlarmScheduling**.
+* Roulette Logic:
+
+    > Build `RouletteModeActor` to manage the random challenge selection seed. Ensure challenge selection respects feature flags and the user's unlocked challenge pool.

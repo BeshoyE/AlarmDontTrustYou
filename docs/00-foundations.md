@@ -37,9 +37,10 @@
 
 * SF Symbols only. Stroke where possible; min tap target 44pt.
 
-## 0.7 Reliability Principles
+## 0.7 Reliability Principles (UPDATED)
 
-* Local notifications are the **primary ringer** and must always be scheduled as the OS-guaranteed sound source.
+* Local notifications (via `AlarmScheduling`) are the **primary ringer** and must always be scheduled as the OS-guaranteed sound source.
+* **Concurrency:** Any shared state required for reliability (e.g., dismissal registry, scheduling limits, audio state flags) **MUST** be protected by **Swift actors**.
 * Audio sessions are an **enhancement**: when the app is active, start continuous playback to improve the user experience.
 * Foreground notifications must suppress `.sound` when audio is actively ringing to avoid double audio.
 * If the audio session is killed by iOS, notifications still guarantee the alarm fires with sound.

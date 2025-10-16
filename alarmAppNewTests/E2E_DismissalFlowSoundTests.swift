@@ -23,13 +23,17 @@ final class E2E_DismissalFlowSoundTests: XCTestCase {
     var mockQRScanning: MockQRScanning!
     var mockAlarmStorage: MockAlarmStorage!
     var mockNotificationService: MockNotificationService!
-    var mockAudioService: MockAudioService!
     var mockAppRouter: MockAppRouter!
     var mockReliabilityLogger: MockReliabilityLogger!
     var mockClock: MockClock!
     var mockPermissionService: MockPermissionService!
     var mockAudioEngine: MockAlarmAudioEngine!
     var mockReliabilityModeProvider: MockReliabilityModeProvider!
+    var mockDismissedRegistry: DismissedRegistry!
+    var mockSettingsService: MockSettingsService!
+    var mockAlarmScheduler: MockAlarmScheduling!
+    var mockAlarmRunStore: AlarmRunStore!
+    var mockIdleTimerController: MockIdleTimerController!
 
     override func setUp() {
         super.setUp()
@@ -42,13 +46,17 @@ final class E2E_DismissalFlowSoundTests: XCTestCase {
         mockQRScanning = nil
         mockAlarmStorage = nil
         mockNotificationService = nil
-        mockAudioService = nil
         mockAppRouter = nil
         mockReliabilityLogger = nil
         mockClock = nil
         mockPermissionService = nil
         mockAudioEngine = nil
         mockReliabilityModeProvider = nil
+        mockDismissedRegistry = nil
+        mockSettingsService = nil
+        mockAlarmScheduler = nil
+        mockAlarmRunStore = nil
+        mockIdleTimerController = nil
         super.tearDown()
     }
 
@@ -56,13 +64,17 @@ final class E2E_DismissalFlowSoundTests: XCTestCase {
         mockQRScanning = MockQRScanning()
         mockAlarmStorage = MockAlarmStorage()
         mockNotificationService = MockNotificationService()
-        mockAudioService = MockAudioService()
         mockAppRouter = MockAppRouter()
         mockReliabilityLogger = MockReliabilityLogger()
         mockClock = MockClock()
         mockPermissionService = MockPermissionService()
         mockAudioEngine = MockAlarmAudioEngine()
         mockReliabilityModeProvider = MockReliabilityModeProvider()
+        mockDismissedRegistry = DismissedRegistry()
+        mockSettingsService = MockSettingsService()
+        mockAlarmScheduler = MockAlarmScheduling()
+        mockAlarmRunStore = AlarmRunStore()
+        mockIdleTimerController = MockIdleTimerController()
     }
 
     private func createViewModel() {
@@ -74,9 +86,13 @@ final class E2E_DismissalFlowSoundTests: XCTestCase {
             appRouter: mockAppRouter,
             permissionService: mockPermissionService,
             reliabilityLogger: mockReliabilityLogger,
-            audioService: mockAudioService,
             audioEngine: mockAudioEngine,
-            reliabilityModeProvider: mockReliabilityModeProvider
+            reliabilityModeProvider: mockReliabilityModeProvider,
+            dismissedRegistry: mockDismissedRegistry,
+            settingsService: mockSettingsService,
+            alarmScheduler: mockAlarmScheduler,
+            alarmRunStore: mockAlarmRunStore,
+            idleTimerController: mockIdleTimerController
         )
     }
 
@@ -104,7 +120,7 @@ final class E2E_DismissalFlowSoundTests: XCTestCase {
     private func waitForRunToBeSaved(timeout: TimeInterval = 1.0) async -> Bool {
         let start = Date()
         while Date().timeIntervalSince(start) < timeout {
-            if mockAlarmStorage.runs.count >= 1 {
+            if await mockAlarmStorage.getStoredRuns().count >= 1 {
                 return true
             }
             try? await Task.sleep(nanoseconds: 50_000_000) // 50ms polling interval
@@ -118,9 +134,9 @@ final class E2E_DismissalFlowSoundTests: XCTestCase {
         let alarmId = UUID()
         let alarm = createTestAlarm(id: alarmId, soundId: "bells01", volume: 0.9)
 
-        try? mockAlarmStorage.saveAlarm(alarm)
+        try? await mockAlarmStorage.saveAlarm(alarm)
 
-        viewModel.start(alarmId: alarmId)
+        await viewModel.start(alarmId: alarmId)
 
         // Wait for async audio start
         try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
@@ -138,10 +154,10 @@ final class E2E_DismissalFlowSoundTests: XCTestCase {
         let expectedQR = "success-qr"
         let alarm = createTestAlarm(id: alarmId, expectedQR: expectedQR)
 
-        try? mockAlarmStorage.saveAlarm(alarm)
+        try? await mockAlarmStorage.saveAlarm(alarm)
 
         // Start alarm
-        viewModel.start(alarmId: alarmId)
+        await viewModel.start(alarmId: alarmId)
         viewModel.beginScan()
 
         // Wait for state transitions
@@ -174,9 +190,9 @@ final class E2E_DismissalFlowSoundTests: XCTestCase {
         let alarmId = UUID()
         let alarm = createTestAlarm(id: alarmId)
 
-        try? mockAlarmStorage.saveAlarm(alarm)
+        try? await mockAlarmStorage.saveAlarm(alarm)
 
-        viewModel.start(alarmId: alarmId)
+        await viewModel.start(alarmId: alarmId)
 
         // Wait for audio to start
         try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
@@ -199,9 +215,9 @@ final class E2E_DismissalFlowSoundTests: XCTestCase {
         let alarmId = UUID()
         let alarm = createTestAlarm(id: alarmId)
 
-        try? mockAlarmStorage.saveAlarm(alarm)
+        try? await mockAlarmStorage.saveAlarm(alarm)
 
-        viewModel.start(alarmId: alarmId)
+        await viewModel.start(alarmId: alarmId)
 
         // Wait for startup
         try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
@@ -232,9 +248,9 @@ final class E2E_DismissalFlowSoundTests: XCTestCase {
         let wrongQR = "wrong-qr"
         let alarm = createTestAlarm(id: alarmId, expectedQR: expectedQR)
 
-        try? mockAlarmStorage.saveAlarm(alarm)
+        try? await mockAlarmStorage.saveAlarm(alarm)
 
-        viewModel.start(alarmId: alarmId)
+        await viewModel.start(alarmId: alarmId)
         viewModel.beginScan()
 
         // Wait for scanning state
@@ -258,9 +274,9 @@ final class E2E_DismissalFlowSoundTests: XCTestCase {
         let alarmId = UUID()
         let alarm = createTestAlarm(id: alarmId)
 
-        try? mockAlarmStorage.saveAlarm(alarm)
+        try? await mockAlarmStorage.saveAlarm(alarm)
 
-        viewModel.start(alarmId: alarmId)
+        await viewModel.start(alarmId: alarmId)
 
         // Wait for startup
         try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
@@ -279,9 +295,9 @@ final class E2E_DismissalFlowSoundTests: XCTestCase {
         let expectedQR = "success-qr"
         let alarm = createTestAlarm(id: alarmId, expectedQR: expectedQR)
 
-        try? mockAlarmStorage.saveAlarm(alarm)
+        try? await mockAlarmStorage.saveAlarm(alarm)
 
-        viewModel.start(alarmId: alarmId)
+        await viewModel.start(alarmId: alarmId)
         viewModel.beginScan()
 
         // Wait for scanning state
@@ -311,10 +327,10 @@ final class E2E_DismissalFlowSoundTests: XCTestCase {
         let expectedQR = "complete-flow-qr"
         let alarm = createTestAlarm(id: alarmId, soundId: "tone01", volume: 0.7, expectedQR: expectedQR)
 
-        try? mockAlarmStorage.saveAlarm(alarm)
+        try? await mockAlarmStorage.saveAlarm(alarm)
 
         // Start the alarm
-        viewModel.start(alarmId: alarmId)
+        await viewModel.start(alarmId: alarmId)
 
         // Verify initial state
         XCTAssertEqual(viewModel.state, .ringing)
@@ -364,8 +380,8 @@ final class E2E_DismissalFlowSoundTests: XCTestCase {
         XCTAssertEqual(mockNotificationService.cancelledNotificationTypes.count, 1)
 
         // Verify alarm run was saved with safe access
-        XCTAssertEqual(mockAlarmStorage.runs.count, 1)
-        guard let run = mockAlarmStorage.runs.first else {
+        XCTAssertEqual(await mockAlarmStorage.getStoredRuns().count, 1)
+        guard let run = await mockAlarmStorage.getStoredRuns().first else {
             XCTFail("Expected alarm run to be saved")
             return
         }
@@ -384,7 +400,7 @@ final class E2E_DismissalFlowSoundTests: XCTestCase {
         let alarmId = UUID()
         let alarm = createTestAlarm(id: alarmId)
 
-        try? mockAlarmStorage.saveAlarm(alarm)
+        try? await mockAlarmStorage.saveAlarm(alarm)
 
         // Simulate snooze action through notification service
         let notificationService = mockNotificationService as! MockNotificationService
@@ -394,7 +410,7 @@ final class E2E_DismissalFlowSoundTests: XCTestCase {
 
         // Test that snooze would work (we can't directly test the delegate without a real notification)
         // But we can verify the snooze function works correctly
-        viewModel.start(alarmId: alarmId)
+        await viewModel.start(alarmId: alarmId)
         viewModel.snooze()
 
         // Wait for snooze processing

@@ -1,4 +1,4 @@
-# V1 — Core Wake Reliability (Target: 2025-08-31)
+# V1 — Core Wake Reliability
 
 ## 1. Goal
 
@@ -9,12 +9,12 @@ Prove the app wakes users reliably, can’t be trivially cheated, and delivers a
 * Alarms: create/edit/delete, repeat, label, sound, volume, vibrate.
 * Challenges: QR, Steps, Math with **enforced order**.
 * Dismissal flow UI (sequential steps, failure timeout).
-* **Local notifications (primary ringer)**; re-register on launch/background.
+* **Alarm Scheduling (AlarmKit / Notifications):** Use the unified `AlarmScheduling` protocol; re-register on launch/background.
 * **Audio session enhancement:** when app is alive, start continuous playback; suppress foreground notification sound to avoid double audio.
-* Local persistence only (no auth/backend).
+* **Local persistence:** Use the **`PersistenceStore` actor** for all alarm and run data; persistence operations must be thread-safe and atomic.
 * Basic Settings (minimal).
 * Minimal analytics (local log + optional console export).
-* Tests: unit (scheduling + validators + suppression logic), one happy-path e2e.
+* Tests: unit (scheduler + validators + suppression logic), one happy-path e2e.
 
 ## 3. Out of Scope (This Version)
 
@@ -27,8 +27,8 @@ Prove the app wakes users reliably, can’t be trivially cheated, and delivers a
 
 * ≥95% of fired alarms complete all selected challenges in testing.
 * Works if app closed/killed; notification still fires; dismissal flow reachable.
+* QR works in low light; steps validate in airplane mode.
 * Continuous audio plays in foreground; no double audio when both audio + notification present.
-* Dark-room QR scan succeeds; step target validated in airplane mode.
 * No crashes across 3 consecutive days of scheduled test alarms.
 
 ## 5. Flags (All Off in V1 Build)
@@ -48,14 +48,14 @@ Prove the app wakes users reliably, can’t be trivially cheated, and delivers a
 * E2E: dismissal flow happy-path with 1 challenge stack.
 * Smoke script: nightly run across 3 devices; record outcomes (foreground + killed).
 
-## 7. AI Prompt Templates
+## 7. AI Prompt Templates (UPDATED)
 
 * Scaffold core app:
 
-  > Use **§2.3 Data Model (User/Alarm/Challenge/AlarmRun)** and **§2.6.1 Alarm Dismissal** from the MVP spec to build SwiftUI views and local scheduler. No backend. Generate unit tests for math/steps/qr validators and audio suppression.
+  > Use **§4 Domain Model (Alarm/Challenge/AlarmRun)** and **§5 Service Contracts (AlarmScheduling, PersistenceStore)** to build SwiftUI views. **Ensure PersistenceStore is implemented as an actor** and all reads/writes are thread-safe. Generate unit tests for math/steps/qr validators and audio suppression.
 * Reliability checks:
 
-  > Write tests to confirm notification re-registration on app relaunch/background per iOS 17+ constraints, and that audio + notif do not double-play.
+  > Write tests to confirm `AlarmScheduling` re-registration on app relaunch/background per iOS 17+ constraints, and that audio + notif do not double-play.
 
 ## 8. References
 

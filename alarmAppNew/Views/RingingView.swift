@@ -11,12 +11,15 @@ import UIKit
 
 struct RingingView: View {
     let alarmID: UUID
+    let intentAlarmID: UUID?  // Intent-provided ID (could be pre-migration)
     @StateObject private var viewModel: DismissalFlowViewModel
     @EnvironmentObject private var container: DependencyContainer
 
-    init(alarmID: UUID, container: DependencyContainer) {
+    init(alarmID: UUID, intentAlarmID: UUID? = nil, container: DependencyContainer) {
         self.alarmID = alarmID
-        self._viewModel = StateObject(wrappedValue: container.makeDismissalFlowViewModel())
+        self.intentAlarmID = intentAlarmID
+        // Pass intent ID to ViewModel through factory
+        self._viewModel = StateObject(wrappedValue: container.makeDismissalFlowViewModel(intentAlarmID: intentAlarmID))
     }
     
     var body: some View {
@@ -59,71 +62,70 @@ struct RingingView: View {
                 }
                 
                 Spacer()
-                
-                // Optional snooze button at bottom
+
+                // Stop and Snooze buttons at bottom
                 if viewModel.state == .ringing {
-                    Button("Snooze (5 min)") {
-                        viewModel.snooze()
+                    VStack(spacing: 16) {
+                        // Stop button (enabled only when challenges complete)
+                        Button {
+                            Task {
+                                await viewModel.stopAlarm()
+                            }
+                        } label: {
+                            Text("Stop Alarm")
+                                .font(.title2)
+                                .fontWeight(.semibold)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 16)
+                                .background(viewModel.canStopAlarm ? Color.red : Color.gray.opacity(0.3))
+                                .foregroundColor(.white)
+                                .cornerRadius(12)
+                        }
+                        .disabled(!viewModel.canStopAlarm)
+                        .accessibilityLabel("Stop Alarm")
+                        .accessibilityHint(viewModel.canStopAlarm ? "Stops the alarm" : "Complete challenges first to stop the alarm")
+
+                        // Snooze button
+                        if viewModel.canSnooze {
+                            Button {
+                                Task {
+                                    await viewModel.snooze()
+                                }
+                            } label: {
+                                Text("Snooze (5 min)")
+                                    .font(.body)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 12)
+                                    .background(Color.gray.opacity(0.3))
+                                    .foregroundColor(.white)
+                                    .cornerRadius(8)
+                            }
+                            .accessibilityLabel("Snooze for 5 minutes")
+                        }
                     }
                     .padding(.horizontal, 32)
-                    .padding(.vertical, 12)
-                    .background(Color.gray.opacity(0.3))
-                    .foregroundColor(.white)
-                    .cornerRadius(8)
                 }
             }
             .padding()
         }
         .task {
-            viewModel.start(alarmId: alarmID)
+            await viewModel.start(alarmId: alarmID)
         }
         .onAppear {
             setupCallbacks()
         }
         .onDisappear {
-            // Ensure audio stops when view disappears
-            stopRingingAudio()
+            // Ensure cleanup when view disappears
+            viewModel.cleanup()
         }
     }
-    
+
     private func setupCallbacks() {
-        viewModel.onRequestScreenAwake = { awake in
-            UIApplication.shared.isIdleTimerDisabled = awake
-        }
-        
-        viewModel.onRequestAudioControl = { shouldPlay in
-            Task { @MainActor in
-                if shouldPlay {
-                    await startRingingAudio()
-                } else {
-                    stopRingingAudio()
-                }
-            }
-        }
-        
         viewModel.onRequestHaptics = {
             // Trigger haptic feedback
             let impactFeedback = UIImpactFeedbackGenerator(style: .heavy)
             impactFeedback.impactOccurred()
         }
-    }
-    
-  private func startRingingAudio() async {
-    // Get the alarm to determine sound settings
-    guard let alarm = try? container.persistenceService.alarm(with: alarmID) else {
-            return
-    }
-        
-        // Start continuous ringing with the alarm's sound and volume
-        await container.audioService.startRinging(
-            soundName: alarm.soundName, 
-            volume: alarm.volume, 
-            loop: true
-        )
-    }
-    
-    private func stopRingingAudio() {
-        container.audioService.stop()
     }
 }
 

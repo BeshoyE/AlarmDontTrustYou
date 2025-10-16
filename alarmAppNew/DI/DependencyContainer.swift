@@ -17,16 +17,16 @@ import UIKit
 class DependencyContainer: ObservableObject {
     // MARK: - Services
     let permissionService: PermissionServiceProtocol
-    let persistenceService: AlarmStorage
-    private let appStateProvider: AppStateProviding
-    private let appLifecycleTracker: AppLifecycleTracking
-    private let notificationServiceConcrete: NotificationService  // Strong concrete retention
+    let persistenceService: PersistenceStore
+    let alarmRunStore: AlarmRunStore
     let qrScanningService: QRScanning
-    let audioService: AudioServiceProtocol
     let appRouter: AppRouter
     let reliabilityLogger: ReliabilityLogging
     private let soundEngineConcrete: AlarmSoundEngine
     let settingsServiceConcrete: SettingsService
+    let alarmIntentBridge: AlarmIntentBridge
+    let alarmScheduler: AlarmScheduling
+    private let idleTimerControllerConcrete: UIApplicationIdleTimerController
 
     // MARK: - New Sound System Services
     private let soundCatalogConcrete: SoundCatalog
@@ -46,7 +46,6 @@ class DependencyContainer: ObservableObject {
     private let systemVolumeProviderConcrete: SystemVolumeProviding
 
     // Public protocol exposure
-    var notificationService: NotificationScheduling { notificationServiceConcrete }
     var refreshCoordinator: RefreshCoordinator { refreshCoordinatorConcrete }
     var audioEngine: AlarmAudioEngineProtocol { soundEngineConcrete }
     var settingsService: SettingsServiceProtocol { settingsServiceConcrete }
@@ -56,8 +55,7 @@ class DependencyContainer: ObservableObject {
     var chainSettingsProvider: ChainSettingsProviding { chainSettingsProviderConcrete }
     var activeAlarmDetector: ActiveAlarmDetector { activeAlarmDetectorConcrete }
     var systemVolumeProvider: SystemVolumeProviding { systemVolumeProviderConcrete }
-
-    private var didActivateNotifications = false
+    var notificationService: AlarmScheduling { alarmScheduler }  // Expose alarmScheduler as notificationService for legacy code
 
     init() {
         // CRITICAL INITIALIZATION ORDER: Prevent dependency cycles
@@ -68,12 +66,13 @@ class DependencyContainer: ObservableObject {
         // 2. Create basic services
         self.permissionService = PermissionService()
         self.reliabilityLogger = LocalReliabilityLogger()
-        self.appStateProvider = AppStateProvider()
-        self.appLifecycleTracker = AppLifecycleTracker()
         self.appRouter = AppRouter()
 
         // 3. Create PersistenceService (will need sound catalog for repairs in future)
         self.persistenceService = PersistenceService()
+
+        // 3.5. Create AlarmRunStore (actor-based, thread-safe)
+        self.alarmRunStore = AlarmRunStore()
 
         // 4. Create AlarmFactory with sound catalog
         self.alarmFactoryConcrete = DefaultAlarmFactory(catalog: soundCatalogConcrete)
@@ -104,27 +103,24 @@ class DependencyContainer: ObservableObject {
         soundEngineConcrete.setReliabilityModeProvider(settingsServiceConcrete)
 
         // 7. Create remaining services (now with all dependencies available)
-        self.notificationServiceConcrete = NotificationService(
-            permissionService: permissionService,
-            appStateProvider: appStateProvider,
-            reliabilityLogger: reliabilityLogger,
-            appRouter: appRouter,
-            persistenceService: persistenceService,
-            chainedScheduler: chainedNotificationSchedulerConcrete,
-            settingsService: settingsServiceConcrete,
-            audioEngine: soundEngineConcrete,
-            dismissedRegistry: dismissedRegistryConcrete,
-            chainSettingsProvider: chainSettingsProviderConcrete,
-            activeAlarmPolicy: activeAlarmPolicyConcrete,
-            lifecycle: appLifecycleTracker
-        )
         self.qrScanningService = QRScanningService(permissionService: permissionService)
-        self.audioService = AudioService()
+        self.idleTimerControllerConcrete = UIApplicationIdleTimerController()
 
-        // 8. Create RefreshCoordinator to coalesce refresh requests
-        self.refreshCoordinatorConcrete = RefreshCoordinator(notificationService: notificationServiceConcrete)
+        // 8. Create AlarmScheduler using factory pattern (iOS 26+ only)
+        // Note: Uses domain UUIDs directly - no external ID mapping needed
+        let presentationBuilder = AlarmPresentationBuilder()
+        if #available(iOS 26.0, *) {
+            self.alarmScheduler = AlarmSchedulerFactory.make(
+                presentationBuilder: presentationBuilder
+            )
+        } else {
+            fatalError("iOS 26+ required for AlarmKit")
+        }
 
-        // 9. Create ActiveAlarmDetector for auto-routing to dismissal
+        // 9. Create RefreshCoordinator to coalesce refresh requests
+        self.refreshCoordinatorConcrete = RefreshCoordinator(notificationService: alarmScheduler)
+
+        // 10. Create ActiveAlarmDetector for auto-routing to dismissal
         self.deliveredNotificationsReaderConcrete = UNDeliveredNotificationsReader()
         self.activeAlarmDetectorConcrete = ActiveAlarmDetector(
             deliveredNotificationsReader: deliveredNotificationsReaderConcrete,
@@ -133,51 +129,19 @@ class DependencyContainer: ObservableObject {
             alarmStorage: persistenceService
         )
 
-        // 10. Create SystemVolumeProvider (no dependencies)
+        // 11. Create SystemVolumeProvider (no dependencies)
         self.systemVolumeProviderConcrete = SystemVolumeProvider()
 
-        // 11. Set up policy provider after all services are initialized
+        // 12. Create AlarmIntentBridge (no dependencies, no OS work in init)
+        self.alarmIntentBridge = AlarmIntentBridge()
+
+        // 13. Set up policy provider after all services are initialized
         soundEngineConcrete.setPolicyProvider { [weak self] in
             self?.settingsServiceConcrete.audioPolicy ?? AudioPolicy(capability: .foregroundAssist, allowRouteOverrideAtAlarm: true)
         }
     }
 
     // MARK: - Activation
-
-    @MainActor
-    func activateNotificationDelegate() {
-        guard !didActivateNotifications else { return }
-
-        // Start lifecycle tracking first
-        appLifecycleTracker.startTracking()
-
-        // Set up notification delegate and categories
-        UNUserNotificationCenter.current().delegate = notificationServiceConcrete
-        notificationServiceConcrete.ensureNotificationCategoriesRegistered()
-
-        // Add foreground cleanup observer for stale chains
-        NotificationCenter.default.addObserver(
-            forName: UIApplication.didBecomeActiveNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task {
-                guard let self = self else { return }
-
-                // Gate cleanup: only run if scheduling is not in progress
-                let isSchedulingActive = await self.refreshCoordinatorConcrete.isSchedulingActive()
-                if !isSchedulingActive {
-                    await self.chainedNotificationSchedulerConcrete.cleanupStaleChains()
-                    print("🧹 Ran stale chain cleanup (scheduling was idle)")
-                } else {
-                    print("⏳ Skipped stale chain cleanup (scheduling in progress)")
-                }
-            }
-        }
-
-        didActivateNotifications = true
-        print("🔄 DependencyContainer: Activated notification delegate, lifecycle tracking, and stale chain cleanup")
-    }
 
     /// Activate observability systems (logging, metrics, etc.)
     /// Call this once at app start - idempotent and separate from notifications
@@ -188,15 +152,56 @@ class DependencyContainer: ObservableObject {
         }
         print("🔄 DependencyContainer: Activated observability systems")
     }
+
+    /// Activate the alarm scheduler if it's AlarmKit-based
+    /// Call this after the container is initialized - idempotent
+    @MainActor
+    func activateAlarmScheduler() async {
+        if #available(iOS 26.0, *) {
+            if let kitScheduler = alarmScheduler as? AlarmKitScheduler {
+                await kitScheduler.activate()
+                print("🔄 DependencyContainer: Activated AlarmKit scheduler")
+            }
+        }
+    }
+
+    /// One-time migration: reconcile AlarmKit IDs after removing external ID mapping
+    /// Ensures all alarms use domain UUIDs directly
+    @MainActor
+    func migrateAlarmKitIDsIfNeeded() async {
+        if #available(iOS 26.0, *) {
+            if let kitScheduler = alarmScheduler as? AlarmKitScheduler {
+                let persisted = (try? await persistenceService.loadAlarms()) ?? []
+                await kitScheduler.reconcileAlarmsAfterMigration(persisted: persisted)
+
+                // Clean up externalAlarmId from persisted alarms
+                let cleaned = persisted.map { alarm -> Alarm in
+                    var mutableAlarm = alarm
+                    mutableAlarm.externalAlarmId = nil
+                    return mutableAlarm
+                }
+
+                if cleaned != persisted {
+                    do {
+                        try await persistenceService.saveAlarms(cleaned)
+                        print("🔄 DependencyContainer: Cleared legacy externalAlarmId fields")
+                    } catch {
+                        print("⚠️ DependencyContainer: Failed to save cleaned alarms: \(error)")
+                    }
+                }
+            }
+        }
+    }
     
     // MARK: - ViewModels
     func makeAlarmListViewModel() -> AlarmListViewModel {
         return AlarmListViewModel(
             storage: persistenceService,
             permissionService: permissionService,
-            notificationService: notificationService,
+            alarmScheduler: alarmScheduler,
             refresher: refreshCoordinatorConcrete,
-            systemVolumeProvider: systemVolumeProviderConcrete
+            systemVolumeProvider: systemVolumeProviderConcrete,
+            notificationService: alarmScheduler  // AlarmScheduler conforms to NotificationScheduling
         )
     }
     
@@ -205,20 +210,25 @@ class DependencyContainer: ObservableObject {
         return AlarmDetailViewModel(alarm: targetAlarm, isNew: alarm == nil)
     }
     
-    func makeDismissalFlowViewModel() -> DismissalFlowViewModel {
+    func makeDismissalFlowViewModel(intentAlarmID: UUID? = nil) -> DismissalFlowViewModel {
         return DismissalFlowViewModel(
             qrScanning: qrScanningService,
-            notificationService: notificationService,
+            notificationService: alarmScheduler,  // AlarmScheduler conforms to NotificationScheduling
             alarmStorage: persistenceService,
             clock: SystemClock(),
             appRouter: appRouter,
             permissionService: permissionService,
             reliabilityLogger: reliabilityLogger,
-            audioService: audioService,
             audioEngine: audioEngine,
             reliabilityModeProvider: settingsService,
             dismissedRegistry: dismissedRegistryConcrete,
-            settingsService: settingsService
+            settingsService: settingsService,
+            alarmScheduler: alarmScheduler,
+            alarmRunStore: alarmRunStore,  // NEW: Inject actor-based run store
+            idleTimerController: idleTimerControllerConcrete,  // NEW: UIKit isolation
+            stopAllowed: StopAlarmAllowed.self,
+            snoozeComputer: SnoozeAlarm.self,
+            intentAlarmId: intentAlarmID  // Pass the intent-provided alarm ID
         )
     }
 }

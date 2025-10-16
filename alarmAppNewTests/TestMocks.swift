@@ -49,7 +49,7 @@ final class MockQRScanning: QRScanning {
 
 // MARK: - Notification Service Mock
 
-final class MockNotificationService: NotificationScheduling {
+final class MockNotificationService: AlarmScheduling {
     var cancelledAlarmIds: [UUID] = []
     var scheduledAlarms: [Alarm] = []
     var cancelledSpecificTypes: [(UUID, [NotificationType])] = []
@@ -120,7 +120,7 @@ final class MockNotificationService: NotificationScheduling {
 
 // MARK: - Alarm Storage Mock
 
-final class MockAlarmStorage: AlarmStorage {
+actor MockAlarmStorage: PersistenceStore {
     var storedAlarms: [Alarm] = []
     var storedRuns: [AlarmRun] = []
     var runs: [AlarmRun] = []
@@ -135,11 +135,13 @@ final class MockAlarmStorage: AlarmStorage {
 
     func alarm(with id: UUID) throws -> Alarm {
         if shouldThrowOnAlarmLoad {
-            throw AlarmStorageError.alarmNotFound
+            struct AlarmNotFoundError: Error {}
+            throw AlarmNotFoundError()
         }
 
         guard let alarm = storedAlarms.first(where: { $0.id == id }) else {
-            throw AlarmStorageError.alarmNotFound
+            struct AlarmNotFoundError: Error {}
+            throw AlarmNotFoundError()
         }
         return alarm
     }
@@ -147,6 +149,29 @@ final class MockAlarmStorage: AlarmStorage {
     func appendRun(_ run: AlarmRun) throws {
         storedRuns.append(run)
         runs.append(run)
+    }
+
+    // MARK: - Test Helper Methods (for external actor access)
+
+    func setStoredAlarms(_ alarms: [Alarm]) {
+        storedAlarms = alarms
+    }
+
+    func getStoredAlarms() -> [Alarm] {
+        storedAlarms
+    }
+
+    func setStoredRuns(_ runs: [AlarmRun]) {
+        storedRuns = runs
+        self.runs = runs
+    }
+
+    func getStoredRuns() -> [AlarmRun] {
+        storedRuns
+    }
+
+    func setShouldThrow(_ value: Bool) {
+        shouldThrowOnAlarmLoad = value
     }
 }
 
@@ -177,17 +202,12 @@ final class MockClock: Clock {
 @MainActor
 final class MockAppRouter: AppRouting {
     var backToListCallCount = 0
-    var dismissalCallCount = 0
     var ringingCallCount = 0
-    var showRingingCalls: [UUID] = []
+    var showRingingCalls: [(UUID, UUID?)] = []
 
-    func showDismissal(for id: UUID) {
-        dismissalCallCount += 1
-    }
-
-    func showRinging(for id: UUID) {
+    func showRinging(for id: UUID, intentAlarmID: UUID? = nil) {
         ringingCallCount += 1
-        showRingingCalls.append(id)
+        showRingingCalls.append((id, intentAlarmID))
     }
 
     func backToList() {
@@ -314,7 +334,7 @@ final class MockAlarmAudioEngine: AlarmAudioEngineProtocol {
 
     func schedulePrewarm(fireAt: Date, soundName: String) throws {
         if shouldThrowOnSchedule {
-            throw MockAudioError.prewarmFailed
+            throw AlarmAudioEngineError.playbackFailed(reason: "Mock prewarm failed")
         }
         scheduledSounds.append((fireAt, soundName))
         currentState = .prewarming
@@ -322,7 +342,7 @@ final class MockAlarmAudioEngine: AlarmAudioEngineProtocol {
 
     func promoteToRinging() throws {
         if shouldThrowOnPromote {
-            throw MockAudioError.promotionFailed
+            throw AlarmAudioEngineError.playbackFailed(reason: "Mock promotion failed")
         }
         promoteCalled = true
         currentState = .ringing
@@ -330,7 +350,7 @@ final class MockAlarmAudioEngine: AlarmAudioEngineProtocol {
 
     func playForegroundAlarm(soundName: String) throws {
         if shouldThrowOnPlay {
-            throw MockAudioError.playbackFailed
+            throw AlarmAudioEngineError.playbackFailed(reason: "Mock playback failed")
         }
         playForegroundAlarmCalls.append(soundName)
         currentState = .ringing
@@ -342,7 +362,7 @@ final class MockAlarmAudioEngine: AlarmAudioEngineProtocol {
 
     func scheduleWithLeadIn(fireAt: Date, soundId: String, leadInSeconds: Int) throws {
         if shouldThrowOnSchedule {
-            throw MockAudioError.prewarmFailed
+            throw AlarmAudioEngineError.playbackFailed(reason: "Mock schedule with lead-in failed")
         }
         scheduleWithLeadInCalls.append((fireAt, soundId, leadInSeconds))
         currentState = .prewarming
@@ -354,56 +374,15 @@ final class MockAlarmAudioEngine: AlarmAudioEngineProtocol {
     }
 }
 
-// MARK: - Audio Service Mock
+// MARK: - Idle Timer Controller Mock
 
-final class MockAudioService: AudioServiceProtocol {
-    var isCurrentlyPlaying = false
-    var lastPlayedSound: String?
-    var lastVolume: Double?
-    var lastLoopSetting: Bool?
-    var sessionActivated = false
-    var stopCallCount = 0
-    var stopAndDeactivateCallCount = 0
+final class MockIdleTimerController: IdleTimerControlling {
+    var isIdleTimerDisabled = false
+    var setIdleTimerCalls: [Bool] = []
 
-    func listAvailableSounds() -> [SoundAsset] {
-        return SoundAsset.availableSounds
-    }
-
-    func preview(soundName: String?, volume: Double) async {
-        lastPlayedSound = soundName
-        lastVolume = volume
-        lastLoopSetting = false
-    }
-
-    func startRinging(soundName: String?, volume: Double, loop: Bool) async {
-        isCurrentlyPlaying = true
-        lastPlayedSound = soundName
-        lastVolume = volume
-        lastLoopSetting = loop
-        sessionActivated = true
-    }
-
-    func stop() {
-        stopCallCount += 1
-        isCurrentlyPlaying = false
-    }
-
-    func stopAndDeactivateSession() {
-        stopAndDeactivateCallCount += 1
-        isCurrentlyPlaying = false
-        sessionActivated = false
-    }
-
-    func isPlaying() -> Bool {
-        return isCurrentlyPlaying
-    }
-
-    func activatePlaybackSession() throws {
-        sessionActivated = true
-    }
-
-    func deactivateSession() throws {
-        sessionActivated = false
+    func setIdleTimer(disabled: Bool) {
+        isIdleTimerDisabled = disabled
+        setIdleTimerCalls.append(disabled)
     }
 }
 
@@ -533,10 +512,129 @@ final class MockSystemVolumeProvider: SystemVolumeProviding {
     }
 }
 
-// MARK: - Mock Error Types
+// MARK: - Mock Alarm Factory
 
-enum MockAudioError: Error {
-    case prewarmFailed
-    case promotionFailed
-    case playbackFailed
+final class MockAlarmFactory: AlarmFactory {
+    func makeNewAlarm() -> Alarm {
+        Alarm(
+            id: UUID(),
+            time: Date().addingTimeInterval(3600),
+            label: "Test Alarm",
+            repeatDays: [],
+            challengeKind: [],
+            expectedQR: nil,
+            stepThreshold: nil,
+            mathChallenge: nil,
+            isEnabled: true,
+            soundId: "ringtone1",
+            soundName: nil,
+            volume: 0.8,
+            externalAlarmId: nil
+        )
+    }
 }
+
+// MARK: - Mock Dismissed Registry (removed - DismissedRegistry is final)
+// Use the real DismissedRegistry in tests or create a protocol-based mock if needed
+
+// MARK: - AlarmScheduling Mock (Consolidated)
+
+/// Shared test double for AlarmScheduling used across all tests.
+/// Keep this in sync with the AlarmScheduling protocol.
+public final class AlarmSchedulingMock: AlarmScheduling {
+
+    // MARK: - Configurable behavior for tests
+    public var shouldThrowOnRequestAuth = false
+    public var shouldThrowOnSchedule = false
+    public var shouldThrowOnStop = false
+    public var shouldThrowOnSnooze = false
+
+    // MARK: - Captured / observable state
+    public private(set) var requestedAuthorizationCount = 0
+    public private(set) var scheduledAlarms: [UUID: Alarm] = [:]
+    public private(set) var canceledAlarmIds: [UUID] = []
+    public private(set) var stoppedAlarmCalls: [(alarmId: UUID, intentAlarmId: UUID?)] = []
+    public private(set) var countdownCalls: [(alarmId: UUID, duration: TimeInterval)] = []
+    public private(set) var reconcileCalls: [(alarms: [Alarm], skipIfRinging: Bool)] = []
+
+    /// Stub return for pending IDs; set in tests as needed.
+    public var pendingIdsStub: [UUID] = []
+
+    // MARK: - Backward compatibility aliases
+
+    /// Backward-compatible alias for stoppedAlarmCalls
+    public var stopCalls: [UUID] {
+        stoppedAlarmCalls.map { $0.alarmId }
+    }
+
+    /// Backward-compatible alias for countdownCalls
+    public var transitionToCountdownCalls: [(UUID, TimeInterval)] {
+        countdownCalls
+    }
+
+    /// Backward-compatible alias for shouldThrowOnSnooze
+    public var shouldThrowOnTransition: Bool {
+        get { shouldThrowOnSnooze }
+        set { shouldThrowOnSnooze = newValue }
+    }
+
+    public init() {}
+
+    // MARK: - AlarmScheduling
+
+    public func requestAuthorizationIfNeeded() async throws {
+        requestedAuthorizationCount += 1
+        if shouldThrowOnRequestAuth { throw TestError.forced }
+    }
+
+    public func schedule(alarm: Alarm) async throws -> String {
+        if shouldThrowOnSchedule { throw TestError.forced }
+        scheduledAlarms[alarm.id] = alarm
+        return "mock-\(alarm.id.uuidString)"
+    }
+
+    public func cancel(alarmId: UUID) async {
+        canceledAlarmIds.append(alarmId)
+        scheduledAlarms.removeValue(forKey: alarmId)
+    }
+
+    public func pendingAlarmIds() async -> [UUID] {
+        pendingIdsStub
+    }
+
+    public func stop(alarmId: UUID, intentAlarmId: UUID?) async throws {
+        if shouldThrowOnStop { throw TestError.forced }
+        stoppedAlarmCalls.append((alarmId, intentAlarmId))
+    }
+
+    public func transitionToCountdown(alarmId: UUID, duration: TimeInterval) async throws {
+        if shouldThrowOnSnooze { throw TestError.forced }
+        countdownCalls.append((alarmId, duration))
+    }
+
+    public func reconcile(alarms: [Alarm], skipIfRinging: Bool) async {
+        reconcileCalls.append((alarms, skipIfRinging))
+    }
+
+    // MARK: - Test helpers
+
+    public func reset() {
+        shouldThrowOnRequestAuth = false
+        shouldThrowOnSchedule = false
+        shouldThrowOnStop = false
+        shouldThrowOnSnooze = false
+
+        requestedAuthorizationCount = 0
+        scheduledAlarms = [:]
+        canceledAlarmIds = []
+        stoppedAlarmCalls = []
+        countdownCalls = []
+        reconcileCalls = []
+        pendingIdsStub = []
+    }
+
+    public enum TestError: Error { case forced }
+}
+
+/// Back-compat so existing tests using `MockAlarmScheduling` keep compiling.
+public typealias MockAlarmScheduling = AlarmSchedulingMock

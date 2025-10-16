@@ -17,11 +17,9 @@ struct ContentView: View {
                 switch router.route {
                 case .alarmList:
                     AlarmsListView(container: container)
-                case .dismissal(let id):
-                    // Legacy stub route - can be removed after migration
-                    DismissalFlowView(alarmID: id, onFinish: { router.backToList() })
-                case .ringing(let id):
-                    RingingView(alarmID: id, container: container)
+                case .ringing(let id, let intentAlarmID):
+                    RingingView(alarmID: id, intentAlarmID: intentAlarmID, container: container)
+                        .environmentObject(container)  // Inject for child views (ScanningContent, FailedContent)
                         .interactiveDismissDisabled(true)
                 }
             }

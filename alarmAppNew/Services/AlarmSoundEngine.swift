@@ -249,11 +249,7 @@ final class AlarmSoundEngine: AlarmAudioEngineProtocol {
         guard player.play() else {
             setState(.idle)
             didActivateSession = false
-            throw NSError(
-                domain: "AlarmSoundEngine",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Failed to start foreground alarm playback"]
-            )
+            throw AlarmAudioEngineError.playbackFailed(reason: "Failed to start foreground alarm playback")
         }
 
         mainPlayer = player
@@ -292,11 +288,7 @@ final class AlarmSoundEngine: AlarmAudioEngineProtocol {
         guard player.play() else {
             setState(.idle)
             didActivateSession = false
-            throw NSError(
-                domain: "AlarmSoundEngine",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Failed to start sleep mode audio"]
-            )
+            throw AlarmAudioEngineError.playbackFailed(reason: "Failed to start sleep mode audio")
         }
 
         mainPlayer = player
@@ -381,11 +373,7 @@ final class AlarmSoundEngine: AlarmAudioEngineProtocol {
         }
         // Fallback to ringtone1
         guard let fallbackURL = Bundle.main.url(forResource: "ringtone1", withExtension: "caf") else {
-            throw NSError(
-                domain: "AlarmSoundEngine",
-                code: 5,
-                userInfo: [NSLocalizedDescriptionKey: "Critical: Both '\(soundName).caf' and fallback 'ringtone1.caf' not found in bundle"]
-            )
+            throw AlarmAudioEngineError.assetNotFound(soundName: "\(soundName) (fallback also missing)")
         }
         print("🔊 AlarmSoundEngine: Using fallback ringtone1.caf for \(soundName)")
         return fallbackURL
@@ -435,11 +423,7 @@ final class AlarmSoundEngine: AlarmAudioEngineProtocol {
         let startAt = player.deviceCurrentTime + max(0.5, delta)
 
         guard player.play(atTime: startAt) else {
-            throw NSError(
-                domain: "AlarmSoundEngine",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "AVAudioPlayer failed to schedule play(atTime:)"]
-            )
+            throw AlarmAudioEngineError.playbackFailed(reason: "AVAudioPlayer failed to schedule play(atTime:)")
         }
 
         self.mainPlayer = player
@@ -692,12 +676,8 @@ final class AlarmSoundEngine: AlarmAudioEngineProtocol {
     private func startCompliantPrewarm() throws {
         // CRITICAL: Bundle asset validation - hard error if missing
         guard let prewarmURL = Bundle.main.url(forResource: "prewarm", withExtension: "caf") else {
-            let error = NSError(
-                domain: "AlarmSoundEngine",
-                code: 3,
-                userInfo: [NSLocalizedDescriptionKey: "CRITICAL: prewarm.caf not found in Copy Bundle Resources - refusing to prewarm with any fallback"]
-            )
-            print("🔊 AlarmSoundEngine: ❌ Bundle assert failed: \(error.localizedDescription)")
+            let error = AlarmAudioEngineError.assetNotFound(soundName: "prewarm")
+            print("🔊 AlarmSoundEngine: ❌ Bundle assert failed: \(error.description)")
             print("🔊 AlarmSoundEngine: ❌ Verify prewarm.caf is in Copy Bundle Resources with correct Target Membership")
             throw error
         }
@@ -708,7 +688,7 @@ final class AlarmSoundEngine: AlarmAudioEngineProtocol {
         prewarmPlayer.prepareToPlay()
 
         guard prewarmPlayer.play() else {
-            throw NSError(domain: "AlarmSoundEngine", code: 4, userInfo: [NSLocalizedDescriptionKey: "Failed to start prewarm audio"])
+            throw AlarmAudioEngineError.playbackFailed(reason: "Failed to start prewarm audio")
         }
 
         self.prewarmPlayer = prewarmPlayer
@@ -956,11 +936,7 @@ extension AlarmSoundEngine {
             if soundName != "ringtone1" {
                 print("🔊 AlarmSoundEngine: '\(soundName).\(`extension`)' not found, trying ultimate fallback 'ringtone1.caf'")
                 guard let fallbackURL = Bundle.main.url(forResource: "ringtone1", withExtension: "caf") else {
-                    throw NSError(
-                        domain: "AlarmSoundEngine",
-                        code: 2,
-                        userInfo: [NSLocalizedDescriptionKey: "Both '\(soundName).\(`extension`)' and fallback 'ringtone1.caf' not found in bundle"]
-                    )
+                    throw AlarmAudioEngineError.assetNotFound(soundName: "\(soundName) (fallback also missing)")
                 }
                 try schedule(soundURL: fallbackURL, fireAt: date)
                 print("🔊 AlarmSoundEngine: ✅ Using fallback 'ringtone1.caf' successfully")
@@ -968,11 +944,7 @@ extension AlarmSoundEngine {
             }
 
             // Even ringtone1 not found - hard failure
-            throw NSError(
-                domain: "AlarmSoundEngine",
-                code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Sound file \(soundName).\(`extension`) not found in bundle"]
-            )
+            throw AlarmAudioEngineError.assetNotFound(soundName: soundName)
         }
 
         try schedule(soundURL: url, fireAt: date)

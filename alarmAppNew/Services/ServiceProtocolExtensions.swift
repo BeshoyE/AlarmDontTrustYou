@@ -9,9 +9,9 @@
 import Foundation
 import SwiftUI
 
-// MARK: - NotificationScheduling Extensions
+// MARK: - AlarmScheduling Extensions
 
-extension NotificationScheduling {
+extension AlarmScheduling {
     // Cancel notifications for a specific alarm ID
     func cancel(alarmId: UUID) async {
         // Implementation delegates to existing infrastructure
@@ -32,102 +32,20 @@ extension NotificationScheduling {
     }
 }
 
-// MARK: - AlarmStorage Extensions
+// MARK: - Error Types
 
-extension AlarmStorage {
+struct AlarmNotFoundError: Error {}
+
+// MARK: - PersistenceStore Extensions
+
+extension PersistenceStore {
     // Convenience method to find alarm by ID
     func alarm(with id: UUID) throws -> Alarm {
         let alarms = try loadAlarms()
         guard let alarm = alarms.first(where: { $0.id == id }) else {
-            throw AlarmStorageError.alarmNotFound
+            throw AlarmNotFoundError()
         }
         return alarm
-    }
-    
-    // Method to append alarm run outcomes
-    func appendRun(_ run: AlarmRun) throws {
-        // Implementation will store runs alongside alarms using UserDefaults pattern
-        let encoder = JSONEncoder()
-        
-        // Load existing runs
-        var existingRuns: [AlarmRun] = []
-        if let data = UserDefaults.standard.data(forKey: "alarm_runs"),
-           let decoded = try? JSONDecoder().decode([AlarmRun].self, from: data) {
-            existingRuns = decoded
-        }
-        
-        // Append new run
-        existingRuns.append(run)
-        
-        // Save back to UserDefaults
-        do {
-            let encoded = try encoder.encode(existingRuns)
-            UserDefaults.standard.set(encoded, forKey: "alarm_runs")
-        } catch {
-            throw AlarmStorageError.saveFailed
-        }
-    }
-    
-    // Method to load alarm runs (for analytics/debugging)
-    func loadRuns() throws -> [AlarmRun] {
-        guard let data = UserDefaults.standard.data(forKey: "alarm_runs"),
-              let runs = try? JSONDecoder().decode([AlarmRun].self, from: data) else {
-            return [] // No runs stored yet
-        }
-        return runs
-    }
-    
-    // Method to load runs for a specific alarm
-    func runs(for alarmId: UUID) throws -> [AlarmRun] {
-        let allRuns = try loadRuns()
-        return allRuns.filter { $0.alarmId == alarmId }
-    }
-    
-    // Method to clean up incomplete runs on app restart
-    func cleanupIncompleteRuns() throws {
-        var allRuns = try loadRuns()
-        let now = Date()
-        var hasChanges = false
-        
-        // Mark incomplete runs older than 1 hour as failed
-        for i in 0..<allRuns.count {
-            let run = allRuns[i]
-            
-            // If run is incomplete (no dismissedAt) and older than 1 hour, mark as failed
-            if run.dismissedAt == nil && 
-               run.outcome == .failed && // Default state
-               now.timeIntervalSince(run.firedAt) > 3600 { // 1 hour
-                
-                allRuns[i].outcome = .failed
-                hasChanges = true
-                print("Marked stale AlarmRun as failed: \(run.id)")
-            }
-        }
-        
-        // Save changes if any
-        if hasChanges {
-            let encoded = try JSONEncoder().encode(allRuns)
-            UserDefaults.standard.set(encoded, forKey: "alarm_runs")
-        }
-    }
-}
-
-// MARK: - Error Types
-
-enum AlarmStorageError: Error, LocalizedError {
-    case alarmNotFound
-    case saveFailed
-    case loadFailed
-    
-    var errorDescription: String? {
-        switch self {
-        case .alarmNotFound:
-            return "Alarm not found"
-        case .saveFailed:
-            return "Failed to save data"
-        case .loadFailed:
-            return "Failed to load data"
-        }
     }
 }
 

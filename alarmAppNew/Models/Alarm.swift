@@ -20,6 +20,7 @@ public struct Alarm: Codable, Equatable, Hashable, Identifiable {
   var soundId: String     // Stable sound ID for catalog lookup
   var soundName: String?  // Legacy field - kept for backward compatibility
   var volume: Double      // Volume for in-app ringing and previews only (0.0-1.0)
+  public var externalAlarmId: String? // AlarmKit/system identifier
 
   // MARK: - Coding Keys (CRITICAL for proper encoding/decoding)
   private enum CodingKeys: String, CodingKey {
@@ -28,6 +29,7 @@ public struct Alarm: Codable, Equatable, Hashable, Identifiable {
     case isEnabled, volume
     case soundId    // CRITICAL: Must be in CodingKeys for proper encoding
     case soundName  // Keep for backward compatibility
+    case externalAlarmId  // AlarmKit external identifier
   }
 
   // MARK: - Custom Decoder (handles missing soundId from old JSON)
@@ -51,12 +53,16 @@ public struct Alarm: Codable, Equatable, Hashable, Identifiable {
 
     // Keep legacy soundName for backward compatibility
     soundName = try container.decodeIfPresent(String.self, forKey: .soundName)
+
+    // Handle optional externalAlarmId for AlarmKit integration
+    externalAlarmId = try container.decodeIfPresent(String.self, forKey: .externalAlarmId)
   }
 
   // Standard initializer for new alarms
   init(id: UUID, time: Date, label: String, repeatDays: [Weekdays], challengeKind: [Challenges],
        expectedQR: String? = nil, stepThreshold: Int? = nil, mathChallenge: MathChallenge? = nil,
-       isEnabled: Bool, soundId: String, soundName: String? = nil, volume: Double) {
+       isEnabled: Bool, soundId: String, soundName: String? = nil, volume: Double,
+       externalAlarmId: String? = nil) {
     self.id = id
     self.time = time
     self.label = label
@@ -69,6 +75,7 @@ public struct Alarm: Codable, Equatable, Hashable, Identifiable {
     self.soundId = soundId
     self.soundName = soundName
     self.volume = volume
+    self.externalAlarmId = externalAlarmId
   }
 }
 

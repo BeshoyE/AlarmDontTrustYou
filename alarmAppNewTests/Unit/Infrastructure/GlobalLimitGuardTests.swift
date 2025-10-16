@@ -185,7 +185,7 @@ final class GlobalLimitGuardTests: XCTestCase {
         XCTAssertEqual(granted, 5)
 
         // Finalize with fewer than reserved (some failed to schedule)
-        limitGuard.finalize(3)
+        await limitGuard.finalize(3)
 
         // Should be able to reserve more now
         let secondGranted = await limitGuard.reserve(2)
@@ -199,11 +199,12 @@ final class GlobalLimitGuardTests: XCTestCase {
         XCTAssertEqual(granted, 2)
 
         // Finalize with more than reserved (shouldn't happen, but be safe)
-        limitGuard.finalize(5)
+        await limitGuard.finalize(5)
 
         // Reserved slots should not go negative
         #if DEBUG
-        XCTAssertEqual(limitGuard.currentReservedSlots, 0)
+        let reservedSlots = await limitGuard.currentReservedSlots
+        XCTAssertEqual(reservedSlots, 0)
         #endif
     }
 
@@ -215,9 +216,9 @@ final class GlobalLimitGuardTests: XCTestCase {
         let first = await limitGuard.reserve(5)
         let second = await limitGuard.reserve(3)
 
-        limitGuard.finalize(2) // Partial finalization of first
-        limitGuard.finalize(3) // Full finalization of second
-        limitGuard.finalize(3) // Finalization of remaining from first
+        await limitGuard.finalize(2) // Partial finalization of first
+        await limitGuard.finalize(3) // Full finalization of second
+        await limitGuard.finalize(3) // Finalization of remaining from first
 
         // Should have all slots available again
         let third = await limitGuard.reserve(10)
@@ -232,10 +233,12 @@ final class GlobalLimitGuardTests: XCTestCase {
 
         let granted = await limitGuard.reserve(5)
         XCTAssertEqual(granted, 5)
-        XCTAssertEqual(limitGuard.currentReservedSlots, 5)
+        let reservedAfterReserve = await limitGuard.currentReservedSlots
+        XCTAssertEqual(reservedAfterReserve, 5)
 
-        limitGuard.resetReservations()
-        XCTAssertEqual(limitGuard.currentReservedSlots, 0)
+        await limitGuard.resetReservations()
+        let reservedAfterReset = await limitGuard.currentReservedSlots
+        XCTAssertEqual(reservedAfterReset, 0)
 
         // Should be able to reserve full amount again
         let secondGranted = await limitGuard.reserve(5)
@@ -245,17 +248,21 @@ final class GlobalLimitGuardTests: XCTestCase {
     func test_currentReservedSlots_trackingCorrectly() async {
         mockNotificationCenter.pendingRequests = []
 
-        XCTAssertEqual(limitGuard.currentReservedSlots, 0)
+        let initialReserved = await limitGuard.currentReservedSlots
+        XCTAssertEqual(initialReserved, 0)
 
         let granted = await limitGuard.reserve(10)
         XCTAssertEqual(granted, 10)
-        XCTAssertEqual(limitGuard.currentReservedSlots, 10)
+        let reservedAfterReserve = await limitGuard.currentReservedSlots
+        XCTAssertEqual(reservedAfterReserve, 10)
 
-        limitGuard.finalize(7)
-        XCTAssertEqual(limitGuard.currentReservedSlots, 3)
+        await limitGuard.finalize(7)
+        let reservedAfterFirstFinalize = await limitGuard.currentReservedSlots
+        XCTAssertEqual(reservedAfterFirstFinalize, 3)
 
-        limitGuard.finalize(3)
-        XCTAssertEqual(limitGuard.currentReservedSlots, 0)
+        await limitGuard.finalize(3)
+        let reservedAfterSecondFinalize = await limitGuard.currentReservedSlots
+        XCTAssertEqual(reservedAfterSecondFinalize, 0)
     }
     #endif
 

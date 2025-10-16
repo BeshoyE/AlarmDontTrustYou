@@ -3,12 +3,13 @@
 //  alarmAppNew
 //
 //  Created by Beshoy Eskarous on 7/10/25.
+//  Converted to actor for thread-safe persistence per CLAUDE.md §3
 //
 
 import Foundation
 
 
-final class PersistenceService: AlarmStorage {
+actor PersistenceService: PersistenceStore {
   private let userDefaultsKey = "savedAlarms"
   private let defaults: UserDefaults
   private let soundCatalog: SoundCatalogProviding
@@ -53,7 +54,8 @@ final class PersistenceService: AlarmStorage {
             isEnabled: alarms[i].isEnabled,
             soundId: soundCatalog.defaultSoundId,
             soundName: alarms[i].soundName,
-            volume: alarms[i].volume
+            volume: alarms[i].volume,
+            externalAlarmId: alarms[i].externalAlarmId
           )
           needsRepair = true
         }

@@ -7,16 +7,10 @@
 //
 
 import AVFoundation
-
-/// Protocol for reading system volume levels
-protocol SystemVolumeProviding {
-    /// Returns the current media volume (0.0–1.0)
-    /// Note: This reads AVAudioSession.outputVolume, which is media volume only.
-    /// Ringer volume is NOT accessible via public APIs.
-    func currentMediaVolume() -> Float
-}
+import alarmAppNew
 
 /// Concrete implementation using AVAudioSession
+/// Conforms to the SystemVolumeProviding protocol defined in Domain
 @MainActor
 final class SystemVolumeProvider: SystemVolumeProviding {
     func currentMediaVolume() -> Float {

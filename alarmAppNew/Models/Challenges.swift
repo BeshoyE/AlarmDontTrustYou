@@ -4,12 +4,12 @@
 //
 //  Created by Beshoy Eskarous on 7/3/25.
 //
-enum Challenges: CaseIterable, Codable, Equatable, Hashable {
+public enum Challenges: CaseIterable, Codable, Equatable, Hashable {
   case qr
   case stepCount
   case math
 
-  var displayName: String {
+  public var displayName: String {
     switch self {
     case .qr: return "QR Code"
     case .stepCount: return "Step Count"

@@ -15,24 +15,27 @@ class AlarmListViewModel: ObservableObject {
   @Published var showPermissionBlocking = false
   @Published var showMediaVolumeWarning = false
 
-  private let storage: AlarmStorage
+  private let storage: PersistenceStore
   private let permissionService: PermissionServiceProtocol
-  private let notificationService: NotificationScheduling
+  private let alarmScheduler: AlarmScheduling
   private let refresher: RefreshRequesting
   private let systemVolumeProvider: SystemVolumeProviding
+  private let notificationService: AlarmScheduling  // Keep for test methods only
 
   init(
-    storage: AlarmStorage,
+    storage: PersistenceStore,
     permissionService: PermissionServiceProtocol,
-    notificationService: NotificationScheduling,
+    alarmScheduler: AlarmScheduling,
     refresher: RefreshRequesting,
-    systemVolumeProvider: SystemVolumeProviding
+    systemVolumeProvider: SystemVolumeProviding,
+    notificationService: AlarmScheduling  // Keep for test methods
   ) {
     self.storage = storage
     self.permissionService = permissionService
-    self.notificationService = notificationService
+    self.alarmScheduler = alarmScheduler
     self.refresher = refresher
     self.systemVolumeProvider = systemVolumeProvider
+    self.notificationService = notificationService
 
     fetchAlarms()
     checkNotificationPermissions()
@@ -47,12 +50,19 @@ class AlarmListViewModel: ObservableObject {
 
 
   func fetchAlarms() {
-    do {
-      alarms = try storage.loadAlarms()
-      errorMessage = nil
-    } catch {
-      alarms = []
-      errorMessage = "Could not load alarms"
+    Task {
+      do {
+        let loadedAlarms = try await storage.loadAlarms()
+        await MainActor.run {
+          self.alarms = loadedAlarms
+          self.errorMessage = nil
+        }
+      } catch {
+        await MainActor.run {
+          self.alarms = []
+          self.errorMessage = "Could not load alarms"
+        }
+      }
     }
   }
   
@@ -111,18 +121,18 @@ class AlarmListViewModel: ObservableObject {
 
   private func sync(_ alarm: Alarm) async {
     do {
-      try storage.saveAlarms(alarms)
+      try await storage.saveAlarms(alarms)
 
-      // Handle scheduling based on enabled state
+      // Handle scheduling based on enabled state using unified scheduler
       if !alarm.isEnabled {
-        // Cancel notifications when disabling
-        await notificationService.cancelAlarm(alarm)
+        // Cancel alarm when disabling
+        await alarmScheduler.cancel(alarmId: alarm.id)
         print("Alarm \(alarm.id.uuidString.prefix(8)): Cancelled (disabled)")
       } else {
-        // CRITICAL: Use immediate scheduling path for enables/adds
-        // This ensures scheduling completes even if app backgrounds
-        try await notificationService.scheduleAlarmImmediately(alarm)
-        print("Alarm \(alarm.id.uuidString.prefix(8)): Scheduled immediately")
+        // Schedule alarm when enabling/adding
+        // AlarmScheduling.schedule() is always immediate (no separate "immediate" method)
+        _ = try await alarmScheduler.schedule(alarm: alarm)
+        print("Alarm \(alarm.id.uuidString.prefix(8)): Scheduled")
       }
 
       // Still trigger refresh for other alarms (non-blocking, best-effort)
@@ -139,19 +149,28 @@ class AlarmListViewModel: ObservableObject {
       }
     } catch {
       await MainActor.run {
-        // Handle specific notification errors with appropriate messaging
-        if let notificationError = error as? NotificationError {
-          switch notificationError {
+        // Handle specific scheduling errors with appropriate messaging
+        if let schedulingError = error as? AlarmSchedulingError {
+          switch schedulingError {
           case .systemLimitExceeded:
             // Provide helpful guidance for system limit
             self.errorMessage = "Too many alarms scheduled. Please disable some alarms to add more (iOS limit: 64 notifications)."
           case .permissionDenied:
-            self.errorMessage = notificationError.localizedDescription
+            self.errorMessage = schedulingError.description
             self.showPermissionBlocking = true
           case .schedulingFailed:
-            self.errorMessage = notificationError.localizedDescription
+            self.errorMessage = schedulingError.description
           case .invalidConfiguration:
-            self.errorMessage = notificationError.localizedDescription
+            self.errorMessage = schedulingError.description
+          case .notAuthorized:
+            self.errorMessage = "AlarmKit permission not granted"
+            self.showPermissionBlocking = true
+          case .alarmNotFound:
+            self.errorMessage = "Alarm not found in system"
+          case .ambiguousAlarmState:
+            self.errorMessage = "Multiple alarms alerting - cannot determine which to stop"
+          case .alreadyHandledBySystem:
+            self.errorMessage = "Alarm was already handled by system"
           }
         } else {
           self.errorMessage = "Could not update alarm"
@@ -161,7 +180,8 @@ class AlarmListViewModel: ObservableObject {
   }
   
   func refreshAllAlarms() async {
-    await notificationService.refreshAll(from: alarms)
+    // Use refresher which knows how to use the correct scheduler
+    await refresher.requestRefresh(alarms: alarms)
     checkNotificationPermissions()
   }
   

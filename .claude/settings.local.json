@@ -32,7 +32,20 @@
       "Bash(afinfo:*)",
       "Bash(awk:*)",
       "Read(//System/Library/Audio/**)",
-      "WebSearch"
+      "WebSearch",
+      "Read(//var/folders/2z/sz_w33_560x_7wj1qbyd_lbr0000gn/T/TemporaryItems/NSIRD_screencaptureui_zWOTEm/**)",
+      "Read(//var/folders/2z/sz_w33_560x_7wj1qbyd_lbr0000gn/T/TemporaryItems/NSIRD_screencaptureui_SU1yZr/**)",
+      "Bash(mkdir:*)",
+      "WebFetch(domain:medium.com)",
+      "Read(//var/folders/2z/sz_w33_560x_7wj1qbyd_lbr0000gn/T/TemporaryItems/NSIRD_screencaptureui_3OfnZQ/**)",
+      "Read(//Users/beshoy/Library/Logs/DiagnosticReports/**)",
+      "Bash(for:*)",
+      "Bash(do [ -f \"$file\" ])",
+      "Bash(echo \"=== $file ===\")",
+      "Bash(done)",
+      "Bash(python3:*)",
+      "Read(//var/folders/2z/sz_w33_560x_7wj1qbyd_lbr0000gn/T/TemporaryItems/NSIRD_screencaptureui_RTX8kk/**)",
+      "Read(//var/folders/2z/sz_w33_560x_7wj1qbyd_lbr0000gn/T/TemporaryItems/NSIRD_screencaptureui_Hk2pID/**)"
     ],
     "deny": [],
     "ask": []

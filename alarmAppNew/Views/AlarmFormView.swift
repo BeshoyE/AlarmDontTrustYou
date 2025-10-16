@@ -196,12 +196,9 @@ struct AlarmFormView: View {
   // MARK: - Sound Functions
 
   private func previewCurrentSound() {
-    Task {
-      await container.audioService.preview(
-        soundName: detailVM.draft.soundName,
-        volume: detailVM.draft.volume
-      )
-    }
+    // TODO: Implement preview using audioEngine
+    // AudioService was removed - need to add preview method to AlarmAudioEngineProtocol
+    print("Sound preview: \(detailVM.draft.soundName ?? "default") at volume \(detailVM.draft.volume)")
   }
 
   private func testSoundNotification() {

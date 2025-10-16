@@ -5,13 +5,13 @@
 ## 1) Mission
 
 Ship a minimal, reliable alarm that **cannot be dismissed** until the user scans a pre-registered QR code. No backend, no subscriptions.
-Guarantee alarms always fire via **local notifications** while enhancing the user experience with a continuous **audio session** when the app is active.
+Guarantee alarms always fire via **AlarmScheduling (local notifications)** while enhancing the user experience with a continuous **audio session** when the app is active.
 
 ## 2) Problem → Solution
 
 * **Problem:** People silence or snooze alarms too easily.
 * **Solution:** Require scanning a specific QR payload to dismiss.
-* **Reliability:** Always schedule local notifications as the OS-guaranteed sound source.
+* **Reliability:** Always schedule via the **`AlarmScheduling`** protocol as the OS-guaranteed sound source.
 * **Experience:** When app is alive, start an audio session to provide continuous ringing. Suppress notification sound in foreground to avoid double audio.
 
 ## 3) In Scope
@@ -19,9 +19,9 @@ Guarantee alarms always fire via **local notifications** while enhancing the use
 * Alarm CRUD: time, repeat, label, sound, volume, vibrate, enable/disable.
 * **QR challenge only** (AVFoundation); exact payload match.
 * Dismissal flow: **Ringing (fullscreen) → QR Scanner → Success → Dismiss**.
-* Local notifications; **re-register** pending alarms on app launch and when app becomes active.
+* **Alarm Scheduling:** Use the unified `AlarmScheduling` protocol; **re-register** pending alarms on app launch and when app becomes active.
 * **Audio session enhancement:** continuous playback when app is active; foreground notifications omit `.sound` if audio is ringing.
-* Local persistence (SwiftData) for alarms + runs + QR payload.
+* **Local persistence:** Use the thread-safe **`PersistenceStore` actor** (replaces legacy SwiftData) for alarms, runs, and the QR payload.
 * Basic Settings: default sound, haptics, 12/24h.
 * Local reliability log (append events to file or DB).
 * Tests: unit (scheduler + QR validator + persistence round-trip + suppression rule), 1 E2E.
@@ -46,7 +46,7 @@ Guarantee alarms always fire via **local notifications** while enhancing the use
 
 * Fullscreen RingingView (screen awake, system volume respected).
 * Primary CTA: **“Scan Code to Dismiss.”**
-* Scanner screen with torch toggle; if scanned payload == expected → success → stop alarm → mark run success.
+* Scanner screen with torch toggle; if scanned payload == expected → success → stop alarm → mark run success (via `PersistenceStore` actor).
 * **Audio UX:** If app is active, audio session starts ringing continuously. Notifications show banners only (no sound) to prevent overlap. If app is killed, notification sound ensures alarm still fires.
 
 ### 5.3 Permission UX
@@ -59,21 +59,21 @@ Guarantee alarms always fire via **local notifications** while enhancing the use
 * `Alarm { id, time, repeatDays[], label, sound, volume, vibrate, isEnabled, expectedQR:String? }`
 * `AlarmRun { id, alarmId, firedAt, dismissedAt?, outcome: success|fail }`
 
-> For full contracts, see `docs/architecture.md` §4–5.
+> For full contracts, see `CLAUDE.md` §4–5.
 
 ## 7) Services (protocols to implement)
 
-* `NotificationScheduling`: request auth, schedule/cancel, refreshAll, pending IDs.
+* `AlarmScheduling`: request auth, schedule/cancel, reconcile, pending IDs.
 * `QRScanning`: start/stop, `AsyncStream<String>` of payloads.
-* `PersistenceStore`: save/load alarms; append runs.
+* `PersistenceStore` (**Actor**): save/load alarms; append runs.
 * `Clock`: `now()` for deterministic time math in tests.
-* **AudioEngine**: start/stop ringing; `isActivelyRinging` flag for suppression logic.
+* `AudioEngine`: start/stop ringing; `isActivelyRinging` flag for suppression logic.
 
 (Concrete implementations live under `Infrastructure/Services/*` and are wired in `DependencyContainer`.)
 
 ## 8) App Lifecycle Rules
 
-* On app launch **and** when `scenePhase == .active`: `NotificationScheduling.refreshAll(from: alarms)`.
+* On app launch **and** when `scenePhase == .active`: `AlarmScheduling.reconcile(from: alarms)`.
 * Always include a notification action/deeplink back to Ringing/Scanner (“Return to Dismissal”).
 * If audio is ringing, suppress notification `.sound` in `willPresent`.
 
@@ -97,13 +97,13 @@ Guarantee alarms always fire via **local notifications** while enhancing the use
 
 * `ScheduleNextFire` (one-time vs repeat; DST/timezone edges).
 * QR validator: exact match vs wrong/case mismatch; empty expected.
-* Persistence round-trip: create → save → load → equality.
+* Persistence round-trip: create → save → load → equality. **Concurrency Test: Simultaneous save of AlarmRuns on the PersistenceStore actor.**
 * Preflight: notifications disabled → scheduling blocked.
 * Audio suppression: if `isActivelyRinging == true`, notifications omit `.sound`.
 
 **Integration**
 
-* Notification scheduling round-trip with a mock center.
+* Alarm Scheduling round-trip with a mock center.
 * Storage migration ready for V1 (wrap `expectedQR` into a single-item challenge later).
 * Audio + notification interaction (no double sound).
 
@@ -133,10 +133,10 @@ Guarantee alarms always fire via **local notifications** while enhancing the use
 1. **Models & Storage**
 
    * Create `Alarm`, `AlarmRun` (Domain).
-   * SwiftData schema + `PersistenceStore` impl.
+   * `PersistenceStore` protocol implementation as a **Swift actor**.
 2. **Scheduling**
 
-   * `NotificationScheduling` with request auth + schedule + refreshAll.
+   * `AlarmScheduling` with request auth + schedule + reconcile.
    * Re-register on launch/active.
 3. **UI Scaffolding**
 
@@ -153,7 +153,7 @@ Guarantee alarms always fire via **local notifications** while enhancing the use
    * Append events; simple export (optional).
 7. **Tests**
 
-   * Unit (scheduler, QR, persistence, suppression) + one E2E.
+   * Unit (scheduler, QR, persistence, suppression, **concurrency**) + one E2E.
 
 ## 15) Apple APIs & Search Hints
 
@@ -163,10 +163,11 @@ Guarantee alarms always fire via **local notifications** while enhancing the use
 * **Lifecycle:** `scenePhase` changes in SwiftUI, app launch re-registration pattern.
 
 *Search terms:*
-“UNUserNotificationCenter schedule calendar trigger iOS 17”
+“AlarmScheduling schedule calendar trigger iOS 26”
 “AVCaptureMetadataOutput QR SwiftUI sample”
-“SwiftUI scenePhase app becomes active re-register notifications”
+“SwiftUI scenePhase app becomes active reconcile AlarmScheduling”
 “AVAudioSession continuous playback background iOS”
+“Swift actor persistence UserDefaults concurrency”
 
 ## 16) Risks & Mitigations
 
@@ -178,6 +179,7 @@ Guarantee alarms always fire via **local notifications** while enhancing the use
 ## 17) Acceptance Checklist (must pass before ship)
 
 * [ ] All unit & E2E tests pass locally.
+* [ ] **Concurrency tests for PersistenceStore pass.**
 * [ ] 3-day internal dogfood across 3 devices with no crashes.
 * [ ] Notification/camera rationales reviewed; App Privacy strings set.
 * [ ] Reliability log shows expected events.

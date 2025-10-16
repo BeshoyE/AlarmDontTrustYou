@@ -126,7 +126,8 @@ public final class ChainedNotificationScheduler: ChainedNotificationScheduling {
         #endif
 
         defer {
-            globalLimitGuard.finalize(reservedCount)
+            // Finalize is now async (actor method), must wrap in Task
+            Task { await globalLimitGuard.finalize(reservedCount) }
         }
 
         // Step 5: Compute final chain configuration

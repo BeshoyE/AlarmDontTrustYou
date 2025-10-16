@@ -21,9 +21,13 @@ class DismissalFlowViewModelTests: XCTestCase {
     var mockRouter: MockAppRouter!
     var mockPermissionService: MockPermissionService!
     var mockReliabilityLogger: MockReliabilityLogger!
-    var mockAudioService: AudioService!
     var mockAudioEngine: MockAlarmAudioEngine!
     var mockReliabilityModeProvider: MockReliabilityModeProvider!
+    var mockDismissedRegistry: DismissedRegistry!
+    var mockSettingsService: MockSettingsService!
+    var mockAlarmScheduler: MockAlarmScheduling!
+    var mockAlarmRunStore: AlarmRunStore!
+    var mockIdleTimerController: MockIdleTimerController!
 
     override func setUp() {
         super.setUp()
@@ -35,9 +39,13 @@ class DismissalFlowViewModelTests: XCTestCase {
         mockRouter = MockAppRouter()
         mockPermissionService = MockPermissionService()
         mockReliabilityLogger = MockReliabilityLogger()
-        mockAudioService = AudioService()
         mockAudioEngine = MockAlarmAudioEngine()
         mockReliabilityModeProvider = MockReliabilityModeProvider()
+        mockDismissedRegistry = DismissedRegistry()
+        mockSettingsService = MockSettingsService()
+        mockAlarmScheduler = MockAlarmScheduling()
+        mockAlarmRunStore = AlarmRunStore()
+        mockIdleTimerController = MockIdleTimerController()
 
         viewModel = DismissalFlowViewModel(
             qrScanning: mockQRScanning,
@@ -47,33 +55,35 @@ class DismissalFlowViewModelTests: XCTestCase {
             appRouter: mockRouter,
             permissionService: mockPermissionService,
             reliabilityLogger: mockReliabilityLogger,
-            audioService: mockAudioService,
             audioEngine: mockAudioEngine,
-            reliabilityModeProvider: mockReliabilityModeProvider
+            reliabilityModeProvider: mockReliabilityModeProvider,
+            dismissedRegistry: mockDismissedRegistry,
+            settingsService: mockSettingsService,
+            alarmScheduler: mockAlarmScheduler,
+            alarmRunStore: mockAlarmRunStore,
+            idleTimerController: mockIdleTimerController
         )
     }
 
-    func test_start_setsRinging_and_keepsScreenAwake() {
+    func test_start_setsRinging_and_keepsScreenAwake() async {
         // Given
         let alarm = createTestAlarm()
-        mockAlarmStorage.storedAlarms = [alarm]
-        var screenAwakeRequests: [Bool] = []
-        viewModel.onRequestScreenAwake = { screenAwakeRequests.append($0) }
+        await mockAlarmStorage.setStoredAlarms([alarm])
 
         // When
-        viewModel.start(alarmId: alarm.id)
+        await viewModel.start(alarmId: alarm.id)
 
         // Then
         XCTAssertEqual(viewModel.state, .ringing)
         XCTAssertTrue(viewModel.isScreenAwake)
-        XCTAssertEqual(screenAwakeRequests, [true])
+        XCTAssertEqual(mockIdleTimerController.setIdleTimerCalls, [true])
     }
 
     func test_beginScan_requiresPermission_then_transitionsToScanning() async {
         // Given
         let alarm = createTestAlarm()
-        mockAlarmStorage.storedAlarms = [alarm]
-        viewModel.start(alarmId: alarm.id)
+        await mockAlarmStorage.setStoredAlarms([alarm])
+        await viewModel.start(alarmId: alarm.id)
 
         // When
         viewModel.beginScan()
@@ -89,8 +99,8 @@ class DismissalFlowViewModelTests: XCTestCase {
     func test_mismatch_then_match_continuesScanning_and_succeeds() async {
         // Given
         let alarm = createTestAlarm(expectedQR: "correct-code")
-        mockAlarmStorage.storedAlarms = [alarm]
-        viewModel.start(alarmId: alarm.id)
+        await mockAlarmStorage.setStoredAlarms([alarm])
+        await viewModel.start(alarmId: alarm.id)
         viewModel.beginScan()
 
         // Wait for scanning state
@@ -116,11 +126,11 @@ class DismissalFlowViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.state, .success)
     }
 
-    func test_validating_drops_payloads_then_resumes() {
+    func test_validating_drops_payloads_then_resumes() async {
         // Given
         let alarm = createTestAlarm(expectedQR: "test-code")
-        mockAlarmStorage.storedAlarms = [alarm]
-        viewModel.start(alarmId: alarm.id)
+        await mockAlarmStorage.setStoredAlarms([alarm])
+        await viewModel.start(alarmId: alarm.id)
         viewModel.beginScan()
 
         // When - transition to validating
@@ -135,11 +145,11 @@ class DismissalFlowViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.state, initialState)
     }
 
-    func test_success_idempotent_on_rapid_duplicate_payloads() {
+    func test_success_idempotent_on_rapid_duplicate_payloads() async {
         // Given
         let alarm = createTestAlarm(expectedQR: "success-code")
-        mockAlarmStorage.storedAlarms = [alarm]
-        viewModel.start(alarmId: alarm.id)
+        await mockAlarmStorage.setStoredAlarms([alarm])
+        await viewModel.start(alarmId: alarm.id)
         viewModel.beginScan()
 
         // When - rapid duplicate success payloads
@@ -148,15 +158,15 @@ class DismissalFlowViewModelTests: XCTestCase {
 
         // Then - only one success, one run logged
         XCTAssertEqual(viewModel.state, .success)
-        XCTAssertEqual(mockAlarmStorage.storedRuns.count, 1)
-        XCTAssertEqual(mockAlarmStorage.storedRuns.first?.outcome, .success)
+        XCTAssertEqual(await mockAlarmStorage.getStoredRuns().count, 1)
+        XCTAssertEqual(await mockAlarmStorage.getStoredRuns().first?.outcome, .success)
     }
 
-    func test_cancelScan_stopsStream_and_returnsToRinging() {
+    func test_cancelScan_stopsStream_and_returnsToRinging() async {
         // Given
         let alarm = createTestAlarm()
-        mockAlarmStorage.storedAlarms = [alarm]
-        viewModel.start(alarmId: alarm.id)
+        await mockAlarmStorage.setStoredAlarms([alarm])
+        await viewModel.start(alarmId: alarm.id)
         viewModel.beginScan()
 
         // When
@@ -168,14 +178,14 @@ class DismissalFlowViewModelTests: XCTestCase {
         XCTAssertNil(viewModel.scanFeedbackMessage)
     }
 
-    func test_didScan_validPayload_persistsRun_and_cancelsFollowUps() {
+    func test_didScan_validPayload_persistsRun_and_cancelsFollowUps() async {
         // Given
         let alarm = createTestAlarm(expectedQR: "valid-qr")
-        mockAlarmStorage.storedAlarms = [alarm]
+        await mockAlarmStorage.setStoredAlarms([alarm])
         var loggedRuns: [AlarmRun] = []
         viewModel.onRunLogged = { loggedRuns.append($0) }
 
-        viewModel.start(alarmId: alarm.id)
+        await viewModel.start(alarmId: alarm.id)
         viewModel.beginScan()
 
         // When
@@ -183,29 +193,29 @@ class DismissalFlowViewModelTests: XCTestCase {
 
         // Then
         XCTAssertEqual(viewModel.state, .success)
-        XCTAssertEqual(mockAlarmStorage.storedRuns.count, 1)
-        XCTAssertEqual(mockAlarmStorage.storedRuns.first?.outcome, .success)
+        XCTAssertEqual(await mockAlarmStorage.getStoredRuns().count, 1)
+        XCTAssertEqual(await mockAlarmStorage.getStoredRuns().first?.outcome, .success)
         XCTAssertTrue(mockNotifications.cancelledAlarmIds.contains(alarm.id))
         XCTAssertEqual(loggedRuns.count, 1)
     }
 
-    func test_start_alarmNotFound_mapsFailureReason_correctly() {
+    func test_start_alarmNotFound_mapsFailureReason_correctly() async {
         // Given
-        mockAlarmStorage.shouldThrowOnAlarmLoad = true
+        await mockAlarmStorage.setShouldThrow(true)
         let nonExistentId = UUID()
 
         // When
-        viewModel.start(alarmId: nonExistentId)
+        await viewModel.start(alarmId: nonExistentId)
 
         // Then
         XCTAssertEqual(viewModel.state, .failed(.alarmNotFound))
     }
 
-    func test_beginScan_withoutExpectedQR_failsWithCorrectReason() {
+    func test_beginScan_withoutExpectedQR_failsWithCorrectReason() async {
         // Given
         let alarm = createTestAlarm(expectedQR: nil) // No expected QR
-        mockAlarmStorage.storedAlarms = [alarm]
-        viewModel.start(alarmId: alarm.id)
+        await mockAlarmStorage.setStoredAlarms([alarm])
+        await viewModel.start(alarmId: alarm.id)
 
         // When
         viewModel.beginScan()
@@ -214,11 +224,11 @@ class DismissalFlowViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.state, .failed(.noExpectedQR))
     }
 
-    func test_snooze_cancelsAndReschedulesAlarm() {
+    func test_snooze_cancelsAndReschedulesAlarm() async {
         // Given
         let alarm = createTestAlarm()
-        mockAlarmStorage.storedAlarms = [alarm]
-        viewModel.start(alarmId: alarm.id)
+        await mockAlarmStorage.setStoredAlarms([alarm])
+        await viewModel.start(alarmId: alarm.id)
 
         // When
         viewModel.snooze()
@@ -229,31 +239,31 @@ class DismissalFlowViewModelTests: XCTestCase {
         XCTAssertEqual(mockRouter.backToListCallCount, 1)
     }
 
-    func test_abort_logsFailedRun_withoutCancellingFollowUps() {
+    func test_abort_logsFailedRun_withoutCancellingFollowUps() async {
         // Given
         let alarm = createTestAlarm()
-        mockAlarmStorage.storedAlarms = [alarm]
+        await mockAlarmStorage.setStoredAlarms([alarm])
         var loggedRuns: [AlarmRun] = []
         viewModel.onRunLogged = { loggedRuns.append($0) }
 
-        viewModel.start(alarmId: alarm.id)
+        await viewModel.start(alarmId: alarm.id)
 
         // When
         viewModel.abort(reason: "test abort")
 
         // Then
-        XCTAssertEqual(mockAlarmStorage.storedRuns.count, 1)
-        XCTAssertEqual(mockAlarmStorage.storedRuns.first?.outcome, .failed)
+        XCTAssertEqual(await mockAlarmStorage.getStoredRuns().count, 1)
+        XCTAssertEqual(await mockAlarmStorage.getStoredRuns().first?.outcome, .failed)
         XCTAssertEqual(loggedRuns.count, 1)
         XCTAssertTrue(mockNotifications.cancelledAlarmIds.isEmpty) // No cancellation on abort
         XCTAssertEqual(mockRouter.backToListCallCount, 1)
     }
 
-    func test_retry_fromFailedState_returnsToRinging() {
+    func test_retry_fromFailedState_returnsToRinging() async {
         // Given
         let alarm = createTestAlarm(expectedQR: nil)
-        mockAlarmStorage.storedAlarms = [alarm]
-        viewModel.start(alarmId: alarm.id)
+        await mockAlarmStorage.setStoredAlarms([alarm])
+        await viewModel.start(alarmId: alarm.id)
         viewModel.beginScan() // Will fail with noExpectedQR
 
         XCTAssertEqual(viewModel.state, .failed(.noExpectedQR))
@@ -271,9 +281,9 @@ class DismissalFlowViewModelTests: XCTestCase {
     func test_beginScan_cameraPermissionDenied_failsWithPermissionDenied() async {
         // Given
         let alarm = createTestAlarm()
-        mockAlarmStorage.storedAlarms = [alarm]
+        await mockAlarmStorage.setStoredAlarms([alarm])
         mockPermissionService.cameraPermissionStatus = PermissionStatus.denied
-        viewModel.start(alarmId: alarm.id)
+        await viewModel.start(alarmId: alarm.id)
 
         // When
         viewModel.beginScan()
@@ -289,10 +299,10 @@ class DismissalFlowViewModelTests: XCTestCase {
     func test_beginScan_cameraPermissionNotDetermined_requestsAndStartsScanning() async {
         // Given
         let alarm = createTestAlarm()
-        mockAlarmStorage.storedAlarms = [alarm]
+        await mockAlarmStorage.setStoredAlarms([alarm])
         mockPermissionService.cameraPermissionStatus = .notDetermined
         mockPermissionService.requestCameraResult = PermissionStatus.authorized
-        viewModel.start(alarmId: alarm.id)
+        await viewModel.start(alarmId: alarm.id)
 
         // When
         viewModel.beginScan()
@@ -309,10 +319,10 @@ class DismissalFlowViewModelTests: XCTestCase {
     func test_beginScan_cameraPermissionNotDetermined_requestDenied_failsWithPermissionDenied() async {
         // Given
         let alarm = createTestAlarm()
-        mockAlarmStorage.storedAlarms = [alarm]
+        await mockAlarmStorage.setStoredAlarms([alarm])
         mockPermissionService.cameraPermissionStatus = .notDetermined
         mockPermissionService.requestCameraResult = PermissionStatus.denied
-        viewModel.start(alarmId: alarm.id)
+        await viewModel.start(alarmId: alarm.id)
 
         // When
         viewModel.beginScan()
@@ -331,8 +341,8 @@ class DismissalFlowViewModelTests: XCTestCase {
     func test_completeSuccess_atomicGuard_preventsDoubleExecution() async {
         // Given
         let alarm = createTestAlarm(expectedQR: "success-code")
-        mockAlarmStorage.storedAlarms = [alarm]
-        viewModel.start(alarmId: alarm.id)
+        await mockAlarmStorage.setStoredAlarms([alarm])
+        await viewModel.start(alarmId: alarm.id)
         viewModel.beginScan()
 
         // When - rapid multiple success calls
@@ -340,15 +350,15 @@ class DismissalFlowViewModelTests: XCTestCase {
         await viewModel.completeSuccess() // Should be ignored due to atomic guard
 
         // Then - only one run persisted
-        XCTAssertEqual(mockAlarmStorage.storedRuns.count, 1)
-        XCTAssertEqual(mockAlarmStorage.storedRuns.first?.outcome, .success)
+        XCTAssertEqual(await mockAlarmStorage.getStoredRuns().count, 1)
+        XCTAssertEqual(await mockAlarmStorage.getStoredRuns().first?.outcome, .success)
     }
 
-    func test_didScan_duringTransition_dropsPayload() {
+    func test_didScan_duringTransition_dropsPayload() async {
         // Given
         let alarm = createTestAlarm(expectedQR: "test-code")
-        mockAlarmStorage.storedAlarms = [alarm]
-        viewModel.start(alarmId: alarm.id)
+        await mockAlarmStorage.setStoredAlarms([alarm])
+        await viewModel.start(alarmId: alarm.id)
         viewModel.beginScan()
 
         // Set up success to start transition
@@ -362,30 +372,30 @@ class DismissalFlowViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.state, initialState)
     }
 
-    func test_abort_duringSuccess_isIgnored() {
+    func test_abort_duringSuccess_isIgnored() async {
         // Given
         let alarm = createTestAlarm(expectedQR: "success-code")
-        mockAlarmStorage.storedAlarms = [alarm]
-        viewModel.start(alarmId: alarm.id)
+        await mockAlarmStorage.setStoredAlarms([alarm])
+        await viewModel.start(alarmId: alarm.id)
         viewModel.beginScan()
         viewModel.didScan(payload: "success-code")
 
         XCTAssertEqual(viewModel.state, .success)
-        let initialRunCount = mockAlarmStorage.storedRuns.count
+        let initialRunCount = await mockAlarmStorage.getStoredRuns().count
 
         // When - try to abort after success
         viewModel.abort(reason: "test abort")
 
         // Then - abort is ignored, no additional runs logged
         XCTAssertEqual(viewModel.state, .success)
-        XCTAssertEqual(mockAlarmStorage.storedRuns.count, initialRunCount)
+        XCTAssertEqual(await mockAlarmStorage.getStoredRuns().count, initialRunCount)
     }
 
-    func test_snooze_duringSuccess_isIgnored() {
+    func test_snooze_duringSuccess_isIgnored() async {
         // Given
         let alarm = createTestAlarm(expectedQR: "success-code")
-        mockAlarmStorage.storedAlarms = [alarm]
-        viewModel.start(alarmId: alarm.id)
+        await mockAlarmStorage.setStoredAlarms([alarm])
+        await viewModel.start(alarmId: alarm.id)
         viewModel.beginScan()
         viewModel.didScan(payload: "success-code")
 
@@ -398,6 +408,154 @@ class DismissalFlowViewModelTests: XCTestCase {
         // Then - snooze is ignored
         XCTAssertEqual(viewModel.state, .success)
         XCTAssertEqual(mockNotifications.scheduledAlarms.count, initialScheduledCount)
+    }
+
+    // MARK: - CHUNK 5: Stop/Snooze Tests
+
+    func test_canStopAlarm_isFalse_whenChallengesNotComplete() async {
+        // Given
+        let alarm = createTestAlarm()
+        await mockAlarmStorage.setStoredAlarms([alarm])
+        await viewModel.start(alarmId: alarm.id)
+
+        // Then
+        XCTAssertFalse(viewModel.canStopAlarm, "Should not be able to stop before completing challenges")
+    }
+
+    func test_canStopAlarm_isTrue_whenChallengesComplete() async {
+        // Given
+        let alarm = createTestAlarm(expectedQR: "test-code")
+        await mockAlarmStorage.setStoredAlarms([alarm])
+        await viewModel.start(alarmId: alarm.id)
+        viewModel.beginScan()
+
+        // When - complete QR challenge
+        viewModel.didScan(payload: "test-code")
+
+        // Then
+        XCTAssertTrue(viewModel.canStopAlarm, "Should be able to stop after completing challenges")
+    }
+
+    func test_canSnooze_isTrue_whenRinging() async {
+        // Given
+        let alarm = createTestAlarm()
+        await mockAlarmStorage.setStoredAlarms([alarm])
+
+        // When
+        await viewModel.start(alarmId: alarm.id)
+
+        // Then
+        XCTAssertTrue(viewModel.canSnooze, "Should be able to snooze while ringing")
+    }
+
+    func test_canSnooze_isFalse_afterSuccess() async {
+        // Given
+        let alarm = createTestAlarm(expectedQR: "test-code")
+        await mockAlarmStorage.setStoredAlarms([alarm])
+        await viewModel.start(alarmId: alarm.id)
+        viewModel.beginScan()
+
+        // When - complete alarm
+        viewModel.didScan(payload: "test-code")
+
+        // Then
+        XCTAssertFalse(viewModel.canSnooze, "Should not be able to snooze after success")
+    }
+
+    func test_stopAlarm_callsAlarmSchedulerStop() async {
+        // Given
+        let alarm = createTestAlarm(expectedQR: "test-code")
+        await mockAlarmStorage.setStoredAlarms([alarm])
+        await viewModel.start(alarmId: alarm.id)
+        viewModel.beginScan()
+        viewModel.didScan(payload: "test-code")
+
+        // When
+        await viewModel.stopAlarm()
+
+        // Then
+        XCTAssertEqual(mockAlarmScheduler.stopCalls.count, 1, "Should call alarmScheduler.stop()")
+        XCTAssertEqual(mockAlarmScheduler.stopCalls.first, alarm.id)
+    }
+
+    func test_snooze_callsTransitionToCountdown() async {
+        // Given
+        let alarm = createTestAlarm()
+        await mockAlarmStorage.setStoredAlarms([alarm])
+        await viewModel.start(alarmId: alarm.id)
+
+        // When
+        await viewModel.snooze(requestedDuration: 300)
+
+        // Then
+        XCTAssertEqual(mockAlarmScheduler.transitionToCountdownCalls.count, 1)
+        let (alarmId, duration) = mockAlarmScheduler.transitionToCountdownCalls.first!
+        XCTAssertEqual(alarmId, alarm.id)
+        XCTAssertGreaterThan(duration, 0, "Duration should be positive")
+    }
+
+    func test_stopAlarm_logsReliabilityEvent() async {
+        // Given
+        let alarm = createTestAlarm(expectedQR: "test-code")
+        await mockAlarmStorage.setStoredAlarms([alarm])
+        await viewModel.start(alarmId: alarm.id)
+        viewModel.beginScan()
+        viewModel.didScan(payload: "test-code")
+
+        // When
+        await viewModel.stopAlarm()
+
+        // Then
+        let dismissSuccessEvents = mockReliabilityLogger.loggedEvents.filter { $0.event == .dismissSuccess }
+        XCTAssertEqual(dismissSuccessEvents.count, 1, "Should log dismissSuccess event")
+    }
+
+    func test_snooze_logsReliabilityEvent() async {
+        // Given
+        let alarm = createTestAlarm()
+        await mockAlarmStorage.setStoredAlarms([alarm])
+        await viewModel.start(alarmId: alarm.id)
+
+        // When
+        await viewModel.snooze()
+
+        // Then
+        let snoozeEvents = mockReliabilityLogger.loggedEvents.filter { $0.event == .snoozeSet }
+        XCTAssertEqual(snoozeEvents.count, 1, "Should log snoozeSet event")
+    }
+
+    func test_stopAlarm_whenSchedulerThrows_logsError() async {
+        // Given
+        let alarm = createTestAlarm(expectedQR: "test-code")
+        await mockAlarmStorage.setStoredAlarms([alarm])
+        mockAlarmScheduler.shouldThrowOnStop = true
+        await viewModel.start(alarmId: alarm.id)
+        viewModel.beginScan()
+        viewModel.didScan(payload: "test-code")
+
+        // When
+        await viewModel.stopAlarm()
+
+        // Then
+        let failedEvents = mockReliabilityLogger.loggedEvents.filter { $0.event == .stopFailed }
+        XCTAssertEqual(failedEvents.count, 1, "Should log stopFailed event")
+        XCTAssertEqual(viewModel.phase, .failed("Couldn't stop alarm"))
+    }
+
+    func test_snooze_whenSchedulerThrows_logsError() async {
+        // Given
+        let alarm = createTestAlarm()
+        await mockAlarmStorage.setStoredAlarms([alarm])
+        mockAlarmScheduler.shouldThrowOnTransition = true
+        await viewModel.start(alarmId: alarm.id)
+
+        // When
+        await viewModel.snooze()
+
+        // Then
+        let failedEvents = mockReliabilityLogger.loggedEvents.filter { $0.event == .snoozeFailed }
+        XCTAssertEqual(failedEvents.count, 1, "Should log snoozeFailed event")
+        XCTAssertEqual(viewModel.phase, .failed("Couldn't snooze"))
     }
 
     // MARK: - Test Helpers

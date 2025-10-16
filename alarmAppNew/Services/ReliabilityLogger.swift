@@ -14,6 +14,10 @@ enum ReliabilityEvent: String, Codable {
     case fired = "fired"
     case dismissSuccessQR = "dismiss_success_qr"
     case dismissFailQR = "dismiss_fail_qr"
+    case dismissSuccess = "dismiss_success"  // Generic success
+    case stopFailed = "stop_failed"  // AlarmKit stop failed
+    case snoozeSet = "snooze_set"  // Snooze scheduled
+    case snoozeFailed = "snooze_failed"  // Snooze scheduling failed
     case notificationsStatusChanged = "notifications_status_changed"
     case cameraPermissionChanged = "camera_permission_changed"
     case alarmRunCreated = "alarm_run_created"

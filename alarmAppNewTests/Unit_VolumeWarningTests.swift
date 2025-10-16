@@ -14,6 +14,7 @@ final class Unit_VolumeWarningTests: XCTestCase {
     var mockStorage: MockAlarmStorage!
     var mockPermissionService: MockPermissionService!
     var mockNotificationService: MockNotificationService!
+    var mockAlarmScheduler: MockAlarmScheduling!
     var mockRefresher: MockRefresher!
     var mockVolumeProvider: MockSystemVolumeProvider!
     var viewModel: AlarmListViewModel!
@@ -25,6 +26,7 @@ final class Unit_VolumeWarningTests: XCTestCase {
         mockStorage = MockAlarmStorage()
         mockPermissionService = MockPermissionService()
         mockNotificationService = MockNotificationService()
+        mockAlarmScheduler = MockAlarmScheduling()
         mockRefresher = MockRefresher()
         mockVolumeProvider = MockSystemVolumeProvider()
 
@@ -32,9 +34,10 @@ final class Unit_VolumeWarningTests: XCTestCase {
         viewModel = AlarmListViewModel(
             storage: mockStorage,
             permissionService: mockPermissionService,
-            notificationService: mockNotificationService,
+            alarmScheduler: mockAlarmScheduler,
             refresher: mockRefresher,
-            systemVolumeProvider: mockVolumeProvider
+            systemVolumeProvider: mockVolumeProvider,
+            notificationService: mockNotificationService
         )
     }
 

@@ -197,11 +197,11 @@ struct AlarmsListView: View {
           if phase == .active {               // returning from Settings or prompt
               vm.refreshPermission()
 
-              // Check for active alarms and route to dismissal if needed
+              // Check for active alarms and route to ringing if needed
               Task {
-                  if let (alarm, occurrenceKey) = await container.activeAlarmDetector.checkForActiveAlarm() {
-                      print("📱 AlarmsListView: Auto-routing to dismissal for alarm \(alarm.id.uuidString.prefix(8))")
-                      router.showDismissal(for: alarm.id)
+                  if let (alarm, _) = await container.activeAlarmDetector.checkForActiveAlarm() {
+                      print("📱 AlarmsListView: Auto-routing to ringing for alarm \(alarm.id.uuidString.prefix(8))")
+                      router.showRinging(for: alarm.id, intentAlarmID: nil)
                   }
               }
           }
@@ -227,11 +227,8 @@ struct AlarmsListView: View {
         }
       )
     }
-    .onReceive(NotificationCenter.default.publisher(for: .alarmDidFire)) { note in
-                if let id = note.object as? UUID {
-                    router.showDismissal(for: id)
-                }
-            }
+    // Note: .alarmDidFire notification removed with NotificationService migration to AlarmKit
+    // AlarmKit handles alarm firing via intents and the activeAlarmDetector checks on app foreground
     .sheet(isPresented: $showSettings) {
       SettingsView(container: container)
     }

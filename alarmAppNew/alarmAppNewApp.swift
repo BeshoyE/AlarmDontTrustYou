@@ -17,9 +17,8 @@ struct alarmAppNewApp: App {
     private let dependencyContainer = DependencyContainer()
 
     init() {
-        // CRITICAL: Ensure notification delegate is set immediately at app launch
-        // This guarantees the delegate is live before any notifications can fire
-        setupNotificationDelegate()
+        // CRITICAL: Activate AlarmKit scheduler at app launch (iOS 26+ only)
+        setupAlarmKit()
 
         // Activate observability systems for production-ready logging
         dependencyContainer.activateObservability()
@@ -30,34 +29,55 @@ struct alarmAppNewApp: App {
             ContentView()              // we'll repurpose ContentView as the Root
                 .environmentObject(dependencyContainer.appRouter)
                 .environment(\.container, dependencyContainer)  // Inject via environment
+                // Check for pending intents when app becomes active
+                .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+                    Task { @MainActor in
+                        dependencyContainer.alarmIntentBridge.checkForPendingIntent()
+                    }
+                }
+                // Route to ringing screen when alarm intent is received
+                .onReceive(NotificationCenter.default.publisher(for: .alarmIntentReceived)) { notification in
+                    if let intentAlarmId = notification.userInfo?["intentAlarmId"] as? UUID {
+                        // For post-migration alarms, intent ID == domain UUID
+                        // For pre-migration alarms, we pass intent ID and use fallback in stop()
+                        // Since we can't determine which is which here, pass intent ID as both
+                        dependencyContainer.appRouter.showRinging(for: intentAlarmId, intentAlarmID: intentAlarmId)
+                    }
+                }
         }
         .onChange(of: scenePhase) { oldPhase, newPhase in
             handleScenePhaseChange(newPhase)
         }
     }
     
-    private func setupNotificationDelegate() {
-        // Clean activation via DI container
-        dependencyContainer.activateNotificationDelegate()
-
-        // Startup sequence: delegate → refresh → cleanup
-        // Ensures correct initialization order per architecture requirements
+    private func setupAlarmKit() {
+        // AlarmKit activation and initialization sequence (iOS 26+ only)
         Task {
             do {
-                // 1. Load and refresh all alarms for userInfo consistency
-                let alarms = try await dependencyContainer.persistenceService.loadAlarms()
-                await dependencyContainer.refreshCoordinator.requestRefresh(alarms: alarms)
-                print("App Launch: Refreshed all alarms for userInfo consistency (via coordinator)")
+                // 1. Activate AlarmKit scheduler (idempotent)
+                await dependencyContainer.activateAlarmScheduler()
+                print("App Launch: Activated AlarmKit scheduler")
 
-                // 2. Clean up stale delivered notifications from previous sessions
-                await dependencyContainer.notificationService.cleanupStaleDeliveredNotifications()
-                print("App Launch: Cleaned up stale notifications")
+                // 2. ONE-TIME MIGRATION: Reconcile AlarmKit IDs after external mapping removal
+                //    This ensures alarms scheduled before the ID mapping fix are re-registered
+                //    with their domain UUIDs. Runs once per migration version.
+                await dependencyContainer.migrateAlarmKitIDsIfNeeded()
+                print("App Launch: Completed AlarmKit ID migration check")
+
+                // 3. Selective reconciliation: sync daemon with domain alarms
+                //    Uses daemon as source of truth; only touches mismatched alarms
+                let alarms = try await dependencyContainer.persistenceService.loadAlarms()
+                await dependencyContainer.alarmScheduler.reconcile(
+                    alarms: alarms,
+                    skipIfRinging: true
+                )
+                print("App Launch: Reconciled daemon state")
             } catch {
-                print("App Launch: Failed to refresh alarms: \(error)")
+                print("App Launch: Failed to setup AlarmKit: \(error)")
             }
         }
 
-        print("App Launch: Notification delegate and categories set during app initialization")
+        print("App Launch: AlarmKit setup initiated")
     }
 
     private func handleScenePhaseChange(_ phase: ScenePhase) {
@@ -65,7 +85,7 @@ struct alarmAppNewApp: App {
             Task {
                 // Clean up incomplete alarm runs from previous sessions
                 do {
-                    try dependencyContainer.persistenceService.cleanupIncompleteRuns()
+                    try await dependencyContainer.alarmRunStore.cleanupIncompleteRuns()  // NEW: async actor call
                 } catch {
                     print("Failed to cleanup incomplete runs: \(error)")
                 }

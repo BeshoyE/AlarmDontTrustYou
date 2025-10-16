@@ -1,6 +1,5 @@
-
 # Alarm App — Architecture & Engineering Guide
-_Last updated: 2025-08-14_
+_Last updated: 2025-10-10_
 
 This is the **single source of truth** for the product vision, MVP/V1 execution, and technical architecture. Hand it to AI or a new dev and they can start shipping confidently.
 
@@ -8,10 +7,10 @@ This is the **single source of truth** for the product vision, MVP/V1 execution,
 
 ## A) Product Vision (One-Page Brief)
 
-**Problem**  
+**Problem**
 Most alarm apps let users snooze or disable too easily, making consistent wake-ups hard.
 
-**Target User**  
+**Target User**
 People serious about discipline who are willing to complete challenges to prove they’re awake.
 
 **Core Use Cases**
@@ -32,7 +31,7 @@ People serious about discipline who are willing to complete challenges to prove 
 - Location/geofence bed proximity.
 - Payments/accountability penalties.
 
-**Primary Success Metric**  
+**Primary Success Metric**
 % of alarms completed per active user per week.
 
 **Risks/Unknowns**
@@ -40,15 +39,15 @@ People serious about discipline who are willing to complete challenges to prove 
 - Motion accuracy varies by device placement.
 - Users may discover bypass strategies.
 
-**Deadlines**  
-- **MVP 1 (QR-only):** 2025-08-19  
+**Deadlines**
+- **MVP 1 (QR-only):** 2025-08-19
 - **V1 (Core wake reliability: QR+Steps+Math):** 2025-08-31
 
 ---
 
 ## B) V1 Core Execution (Scope & DoD)
 
-**Goal**  
+**Goal**
 Prove the app wakes users reliably and can’t be trivially cheated.
 
 **In Scope (V1)**
@@ -83,11 +82,11 @@ Prove the app wakes users reliably and can’t be trivially cheated.
 ## C) Prototype Plan (from early proposal; aligned to MVP/V1)
 
 **Modules to build**
-1) Alarm Scheduling (UNUserNotificationCenter).  
-2) Challenge modules: **QR** (AVFoundation), **Steps** (CoreMotion pedometer), **Math** (configurable difficulty).  
-3) Dismissal Flow Logic (sequential, enforced order).  
-4) Persistence (SwiftData).  
-5) Basic Settings (sound/vibration/volume).  
+1) Alarm Scheduling (UNUserNotificationCenter).
+2) Challenge modules: **QR** (AVFoundation), **Steps** (CoreMotion pedometer), **Math** (configurable difficulty).
+3) Dismissal Flow Logic (sequential, enforced order).
+4) Persistence (SwiftData).
+5) Basic Settings (sound/vibration/volume).
 6) Anti-cheat hygiene: permission checks, “return to dismissal” deep link, logs.
 
 ---
@@ -111,8 +110,6 @@ Prove the app wakes users reliably and can’t be trivially cheated.
 
 ## 1) Architectural Style (layers & rules)
 
-```
-
 UI (SwiftUI Views)
 ↓
 Presentation (ViewModels, App Router)
@@ -121,7 +118,6 @@ Domain (pure Swift: entities, use cases, policies)
 ↓
 Infrastructure (services: notifications, camera/QR, motion, persistence, logging)
 
-```
 
 **Rules**
 - Views never call services directly. Views → ViewModels only.
@@ -134,8 +130,6 @@ Infrastructure (services: notifications, camera/QR, motion, persistence, logging
 
 ## 2) Project Structure (filesystem)
 
-```
-
 alarm-app/
 ├─ README.md
 ├─ docs/
@@ -144,7 +138,7 @@ alarm-app/
 │  ├─ mvp-1.md
 │  ├─ mvp-2.md
 │  ├─ mvp-3.md
-│  ├─ architecture.md             ← this file
+│  ├─ CLAUDE.md             ← this file
 │  └─ architecture-decisions/
 │     └─ ADR-001-module-strategy.md  # monolith now → packages later
 ├─ AlarmApp/                        # iOS target (monolith for MVP 1–2)
@@ -195,26 +189,37 @@ alarm-app/
 │  │  └─ StorageIntegrationTests.swift
 │  └─ Mocks/ MockNotificationScheduler.swift, MockPedometer.swift, MockQRScanner.swift, FakeClock.swift
 └─ AlarmAppUITests/
-├─ E2E\_Ringing\_QR\_Success.swift
-├─ E2E\_Stack\_QR\_Steps\_Math.swift
+├─ E2E_Ringing_QR_Success.swift
+├─ E2E_Stack_QR_Steps_Math.swift
 └─ StateRestorationTests.swift         # MVP 3
 
-````
 
 > **ADR-001 (module strategy):** Keep a monolith through V1/MVP2. If the app grows, split into Swift Packages: `Domain`, `Data` (infra+persistence), `App` (UI+Presentation), `TestSupport`.
 
 ---
 
-## 3) Concurrency Policy
+## 3) Concurrency Policy (UPDATED & CONSOLIDATED)
 
-- `@MainActor`: all ViewModels & `AppRouter`.
-- Services: non-Main unless required; use `async/await`.
-- **Clock abstraction** keeps time deterministic in tests:
+### General Rules
+- `@MainActor`: All **ViewModels** and the **`AppRouter`** must be marked with `@MainActor` to safely interact with the UI.
+- **Services:** Should be non-Main unless OS requirements dictate otherwise (e.g., Notification delegate wiring); use `async/await` for asynchronous work.
+- **No Main-Thread Blocking:** Do not perform I/O or heavy CPU work on the main thread.
+
+### Shared State & Locking (CRITICAL ADDITIONS)
+- All **Shared Mutable State** (e.g., counters, caches, settings, storage access) **MUST** use the **Swift `actor`** model.
+- New services managing shared state **MUST** be implemented as **Swift `actor`** types.
+- **NEVER** mix manual locking primitives (like `DispatchSemaphore`) or synchronous queue calls (`DispatchQueue.sync`) with Swift concurrency (`async/await` and `Task`).
+- Legacy bridges may use `DispatchQueue` only for non-Main thread work where actors are not feasible (e.g., non-isolated C interop).
+
+### Persistence Concurrency
+- All persistence services that handle reads/writes **MUST** be implemented as **actors**.
+- **Atomic Locking:** Utilize the actor's implicit synchronization to perform the entire load-modify-save sequence atomically (e.g., load all runs, modify in memory, save all runs back).
+
+### Clock Abstraction
+- The **Clock abstraction** keeps time deterministic for testing:
   ```swift
   protocol Clock { func now() -> Date }
-````
-
-* No main-thread I/O or heavy CPU work.
+  ```
 
 ---
 
@@ -250,15 +255,17 @@ alarm-app/
 
 ---
 
-## 5) Service Contracts (protocols the app targets)
+## 5) Service Contracts (protocols the app targets) (UPDATED)
 
 ```swift
-protocol NotificationScheduling {
+protocol AlarmScheduling { // Standardized name for all alarm scheduling and control
   func requestAuthorization() async throws
-  func schedule(alarm: Alarm) async throws
+  func schedule(alarm: Alarm) async throws -> String
   func cancel(alarmId: UUID) async
+  func stop(alarmId: UUID, intentAlarmId: UUID?) async throws
+  func transitionToCountdown(alarmId: UUID, duration: TimeInterval) async throws
   func pendingAlarmIds() async -> [UUID]
-  func refreshAll(from alarms: [Alarm]) async
+  func reconcile(alarms: [Alarm], skipIfRinging: Bool) async
 }
 
 protocol QRScanning {
@@ -280,11 +287,13 @@ protocol MathProviding {
   func check(answer: Int, for problem: MathProblem) -> Bool
 }
 
-protocol PersistenceStore {
-  func saveAlarm(_ alarm: Alarm) throws
+protocol PersistenceStore: Actor { // Now an Actor protocol
+  func saveAlarms(_ alarm: [Alarm]) throws
   func deleteAlarm(id: UUID) throws
   func loadAlarms() throws -> [Alarm]
-  func appendRun(_ run: AlarmRun) throws
+  func appendRun(_ run: AlarmRun) throws(PersistenceStoreError) // Specific run operations moved here
+  func loadRuns() throws -> [AlarmRun] // Specific run operations moved here
+  // ... other storage methods will use this contract
 }
 
 struct HealthSnapshot {
@@ -296,8 +305,28 @@ protocol HealthStatusProviding {      // MVP 3
   func snapshot() async -> HealthSnapshot
 }
 ```
+> **Note:** The `PersistenceStore` protocol is now mandatory to be an `Actor`.
 
-> Concrete implementations live under `Infrastructure/Services/*` and are wired in `DependencyContainer`.
+---
+
+## 5.5) Error Handling Strategy (NEW)
+
+### Propagation Rules
+- **Domain:** Define clear, typed error enums (e.g., `AlarmSchedulingError`, `PersistenceStoreError`).
+- **Infrastructure:** Must map all underlying framework errors (e.g., `UNError`, `AVError`) to the appropriate domain-level typed error before throwing.
+- **Presentation:** Must convert domain errors to user-friendly messages for display.
+- **NEVER:** Use empty `catch {}` blocks or silent `try?` without rethrow/log/fallback.
+
+### Standard Persistence Error
+```swift
+// Domain
+public enum PersistenceStoreError: Error, Equatable {
+    case alarmNotFound
+    case saveFailed
+    case loadFailed
+    case dataCorrupted
+}
+```
 
 ---
 
@@ -334,11 +363,12 @@ protocol HealthStatusProviding {      // MVP 3
 
 ---
 
-## 9) Persistence (SwiftData)
+## 9) Persistence (UPDATED)
 
-* Store `Alarm`, `AlarmRun`, and V1+ `Challenge` with minimal mapping.
-* Migration: MVP 1 → V1 wraps `expectedQR` into `[Challenge]` with `.qr(expected:)`.
-* All persistence APIs are `async` and `throws`. No main-thread I/O.
+- Store `Alarm`, **`AlarmRun`**, and V1+ `Challenge` with minimal mapping.
+- **Alarm Run Persistence:** The primary storage mechanism (`PersistenceStore` / `PersistenceService`) **MUST** own and manage the CRUD (Create, Read, Update, Delete) for **`AlarmRun`** entities. All `AlarmRun` logic (e.g., `appendRun`, `loadRuns`, `cleanupIncompleteRuns`) must live within the actor implementation of `PersistenceStore`.
+- **Error Contract:** All persistence APIs are `async` and **`throws PersistenceStoreError`**. No main-thread I/O.
+- **Migration:** MVP 1 → V1 wraps `expectedQR` into `[Challenge]` with `.qr(expected:)`.
 
 ---
 
@@ -438,6 +468,26 @@ Buddy notifications, photo proof, bedtime flow, light backend.
 * Don’t block the main thread.
 * Don’t introduce singletons.
 
+
+---
+
+## D) Guardrails for AI Codegen
+
+All AI-generated code must follow the rules in [`docs/claude-guardrails.md`](docs/claude-guardrails.md).
+
+### Key Principles (summary)
+- **Init purity** → no I/O, OS calls, delegate wiring, or `fatalError` in initializers
+- **Activation-only side effects** → notification delegate/category setup happens only in explicit, idempotent activation methods called from App startup
+- **Protocol-first DI** → expose protocols from the container; keep concrete instances private for retention/wiring; no `DependencyContainer.shared` reach-ins
+- **UIKit isolation** → UIKit imports and APIs only in Infrastructure layer (e.g., AppStateProvider, NotificationService); never in Domain or SwiftUI Presentation layers
+- **Main-thread boundaries** → all UIKit/OS calls wrapped in `@MainActor` contexts
+- **Idempotency** → setup/registration safe to call multiple times without duplicates or crashes
+- **Structured logging** → every observable event logs `{ alarmId, event, source/action, category, occurrenceKey? }`
+- **Testing** → new providers have mocks; activation is tested for idempotency; malformed inputs validated at receipt time without crashing
+
+👉 For boilerplate patterns (activation, category registration, app state provider), the full Definition of Done checklist, and lint/fail-fast rules, see [`claude-guardrails.md`](docs/claude-guardrails.md).
+
+
 **PR Acceptance Checklist**
 
 * [ ] Unit tests for new logic; UI/E2E if user-visible.
@@ -445,6 +495,4 @@ Buddy notifications, photo proof, bedtime flow, light backend.
 * [ ] No main-thread I/O.
 * [ ] Logs where failure is possible.
 * [ ] Docs updated if contracts/schema changed.
-
-
-
+```

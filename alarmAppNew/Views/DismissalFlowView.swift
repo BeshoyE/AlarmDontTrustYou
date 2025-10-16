@@ -3,8 +3,8 @@ import SwiftUI
 
 struct DismissalFlowView: View {
     let alarmID: UUID
+    let container: DependencyContainer  // Explicit dependency injection (matches RingingView pattern)
     let onFinish: () -> Void
-    @EnvironmentObject private var container: DependencyContainer
     @Environment(\.scenePhase) private var scenePhase
     @State private var isSceneReady = false
 
@@ -12,6 +12,7 @@ struct DismissalFlowView: View {
         Group {
             if isSceneReady {
                 RingingView(alarmID: alarmID, container: container)
+                    .environmentObject(container)  // Inject for child views (ScanningContent, FailedContent)
                     .onDisappear {
                         onFinish()
                     }

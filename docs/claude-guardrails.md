@@ -1,10 +1,12 @@
-# Guardrails
+# Guardrails 
 
 * **No side effects in initializers.** Constructors must not do I/O, talk to OS APIs, or assert/`fatalError`.
 * **OS work only in explicit activation methods.** E.g., notification delegate wiring + category registration live in `DependencyContainer.activate…()` (idempotent) and are called from App startup.
+* **Concurrency Strategy (CRITICAL):** All new services managing shared mutable state **MUST** be implemented as **Swift `actor`** types. Use the actor for thread-safe access to mutable properties (e.g., internal cache, storage). **NEVER** mix manual locking primitives (like `DispatchSemaphore` or `DispatchQueue.sync`) with Swift concurrency (`async/await` and `Task`).
 * **Validate only on receipt.** Any strict checks (e.g., `userInfo["alarmId"]`, category IDs) happen in `UNUserNotificationCenterDelegate` callbacks, never during registration.
 * **Protocol-first DI.** Expose protocols from the container; keep concrete instances private for retention/wiring.
 * **Main-thread boundaries are explicit.** Stamp OS-touching helpers with `@MainActor` (or hop to main) when accessing UIKit / NotificationCenter delegate assignment.
+* **Error Handling Enforcement:** All Infrastructure and Persistence methods **MUST** throw a **typed domain error** (e.g., `PersistenceStoreError`, `AlarmSchedulingError`). Silent catches (`catch {}`) and `try?` without logging or rethrow are strictly forbidden in production code.
 * **Idempotency by design.** All setup/registration functions are safe to call multiple times (no duplicates, no side effects).
 * **No singletons in methods.** Never reach into `DependencyContainer.shared` from within services—use injected deps only.
 * **Structured logging contract.** Every observable event logs `{ alarmId, event, source/action, category, occurrenceKey? }`.
@@ -26,11 +28,9 @@ func activateNotificationDelegate() {
     notificationServiceConcrete.ensureNotificationCategoriesRegistered()
     didActivateNotifications = true
 }
-```
+Category registration (minimal + idempotent)
+Swift
 
-## Category registration (minimal + idempotent)
-
-```swift
 // NotificationService.swift
 func ensureNotificationCategoriesRegistered() {
     let open = UNNotificationAction(identifier: "OPEN_ALARM", title: "Open", options: [.foreground])
@@ -50,45 +50,50 @@ func ensureNotificationCategoriesRegistered() {
         self.reliabilityLogger.info("categories_registered", details: ["category":"ALARM_CATEGORY"])
     }
 }
-```
+App state provider (UIKit isolated + main-thread safe)
+Swift
 
-## App state provider (UIKit isolated + main-thread safe)
-
-```swift
 protocol AppStateProviding { var isAppActive: Bool { get } }
 
 @MainActor
 final class AppStateProvider: AppStateProviding {
     var isAppActive: Bool { UIApplication.shared.applicationState == .active }
 }
-```
-
-# “Definition of Done” add-ons
-
+“Definition of Done” add-ons (UPDATED)
 Ask Claude to include these in DoD for each stage:
 
-* **Init purity:** No initializers contain I/O, OS calls, asserts, or delegate wiring.
-* **Activation verified:** Activation hook exists, is `@MainActor`, idempotent, and called from App startup.
-* **Receipt validation only:** All validation happens in `willPresent`/`didReceive`; registration is construction-only.
-* **DI conformance:** Public surface is protocol-typed; no method references `DependencyContainer.shared`.
-* **Logs present:** At least one log for activation, category registration, receipt (tap/action), and routing failure.
-* **Tests include:**
+Init purity: No initializers contain I/O, OS calls, asserts, or delegate wiring.
 
-  * A mock for any new provider (e.g., `AppStateProviding`).
-  * A test asserting activation is idempotent (calling twice has no side effects).
-  * A test confirming receipt-time validation logs (and does not crash) on malformed notifications.
+Activation verified: Activation hook exists, is @MainActor, idempotent, and called from App startup.
 
-# “Fail fast” lint items (small checks Claude can add)
+Receipt validation only: All validation happens in willPresent/didReceive; registration is construction-only.
 
-* **Search-and-block list:** In changed files, assert there are **no** occurrences of `fatalError(`, `precondition(`, or `!` unwraps inside initializers or registration functions.
-* **Singleton sniff:** Reject any new usage of `DependencyContainer.shared` inside services.
-* **MainActor guard:** Any use of `UIApplication.shared` or delegate assignment must be inside a `@MainActor` context.
+DI conformance: Public surface is protocol-typed; no method references DependencyContainer.shared.
 
-# Optional nice-to-haves (cheap now, big payoff later)
+Concurrency Conformance: All shared mutable state is protected by actor types. No new usage of manual locks.
 
-* **Occurrence key standard:** When you get to nudges (1D), standardize an `occurrenceKey` (timestamp) in identifiers + `userInfo`.
-* **One-shot migration flag:** For launch migrations (like your refresh), gate with a persisted “ranOnce” flag so it can’t loop.
-* **Logger shape helper:** Provide a tiny helper to enforce consistent fields for notification logs.
+Logs present: At least one log for activation, category registration, receipt (tap/action), and routing failure.
+
+Tests include:
+
+A mock for any new provider (e.g., AppStateProviding).
+
+A test asserting activation is idempotent (calling twice has no side effects).
+
+A test confirming receipt-time validation logs (and does not crash) on malformed notifications.
+
+A concurrency test asserting load-modify-save is atomic for shared state (e.g., PersistenceStore).
+
+“Fail fast” lint items (UPDATED)
+Search-and-block list: In changed files, assert there are no occurrences of fatalError(, precondition(, or ! unwraps inside initializers or registration functions.
+
+Singleton sniff: Reject any new usage of DependencyContainer.shared inside services.
+
+MainActor guard: Any use of UIApplication.shared or delegate assignment must be inside a @MainActor context.
+
+Concurrency Guard: Reject any new usage of DispatchSemaphore or DispatchQueue.sync in actor types or asynchronous functions.
+
+Silent Failure Guard: Reject any empty catch {} blocks or unhandled try? in production code.
 
 If you paste these sections into future Claude commands (Guardrails + DoD add-ons + boilerplate), you’ll keep the initializer purity, activation pattern, and receive-side validation intact as the app grows.
 
@@ -157,3 +162,6 @@ Search for DependencyContainer.shared inside services and fail.
 Search initializers for UIApplication/UNUserNotificationCenter and fail.
 
 Ensure at least one test mocks any newly introduced provider (e.g., AppStateProviding).
+
+
+

@@ -27,6 +27,7 @@ class DependencyContainer: ObservableObject {
     let alarmIntentBridge: AlarmIntentBridge
     let alarmScheduler: AlarmScheduling
     private let idleTimerControllerConcrete: UIApplicationIdleTimerController
+    private let shareProviderConcrete: ShareProviding
 
     // MARK: - New Sound System Services
     private let soundCatalogConcrete: SoundCatalog
@@ -105,6 +106,7 @@ class DependencyContainer: ObservableObject {
         // 7. Create remaining services (now with all dependencies available)
         self.qrScanningService = QRScanningService(permissionService: permissionService)
         self.idleTimerControllerConcrete = UIApplicationIdleTimerController()
+        self.shareProviderConcrete = SystemShareProvider()
 
         // 8. Create AlarmScheduler using factory pattern (iOS 26+ only)
         // Note: Uses domain UUIDs directly - no external ID mapping needed
@@ -229,6 +231,13 @@ class DependencyContainer: ObservableObject {
             stopAllowed: StopAlarmAllowed.self,
             snoozeComputer: SnoozeAlarm.self,
             intentAlarmId: intentAlarmID  // Pass the intent-provided alarm ID
+        )
+    }
+
+    func makeSettingsViewModel() -> SettingsViewModel {
+        return SettingsViewModel(
+            reliabilityLogger: reliabilityLogger,
+            shareProvider: shareProviderConcrete
         )
     }
 }

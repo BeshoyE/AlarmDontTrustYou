@@ -9,10 +9,12 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject private var settingsService: SettingsService
+    @StateObject private var viewModel: SettingsViewModel
     @Environment(\.dismiss) private var dismiss
 
     init(container: DependencyContainer) {
         self.settingsService = container.settingsServiceConcrete
+        self._viewModel = StateObject(wrappedValue: container.makeSettingsViewModel())
     }
 
     var body: some View {
@@ -86,6 +88,30 @@ struct SettingsView: View {
                 }
                 .headerProminence(.increased)
 #endif
+
+                // Diagnostics Section
+                Section("Diagnostics") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Reliability Logs")
+                            .font(.headline)
+
+                        Text("Export alarm firing and dismissal events for troubleshooting")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        Button {
+                            viewModel.exportLogs()
+                        } label: {
+                            HStack {
+                                Image(systemName: "square.and.arrow.up")
+                                Text("Export Logs")
+                            }
+                        }
+                        .accessibilityLabel("Export reliability logs")
+                        .accessibilityHint("Shares alarm event logs for troubleshooting")
+                    }
+                    .padding(.vertical, 4)
+                }
 
                 // Reset Section
                 Section("Reset") {

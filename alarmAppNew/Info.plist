@@ -6,6 +6,8 @@
 	<string>This app needs notification permission to deliver reliable alarm notifications that will wake you up at the scheduled time.</string>
 	<key>NSAlarmKitUsageDescription</key>
 	<string>This app needs alarm access to schedule reliable wake-up alarms with challenges that ensure you're fully awake.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>This app needs camera access to scan QR codes for alarm dismissal challenges. Scanning a QR code ensures you're fully awake before dismissing the alarm.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

@@ -121,6 +121,8 @@ struct AlarmsListView: View {
                 .background(Circle().fill(Color.accentColor))
                 .shadow(color: .black.opacity(0.3), radius: 4, x: 0, y: 2)
             }
+            .accessibilityLabel("Create new alarm")
+            .accessibilityHint("Opens alarm creation form")
             .padding(.trailing, 20)
             .padding(.bottom, 20)
           }
@@ -273,6 +275,7 @@ struct AlarmRowView: View {
           set: { _ in onToggle() }
         ))
         .labelsHidden()
+        .accessibilityLabel("\(alarm.isEnabled ? "Disable" : "Enable") alarm for \(alarm.time, style: .time)")
       }
       .padding(.vertical, 8)
     }

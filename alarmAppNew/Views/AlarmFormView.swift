@@ -64,7 +64,9 @@ struct AlarmFormView: View {
          }
          .buttonStyle(.plain)
          .foregroundColor(.accentColor)
-         
+         .accessibilityLabel("Preview selected alarm sound")
+         .accessibilityHint("Plays a short preview of the selected sound")
+
          // Volume Slider
          VStack(alignment: .leading, spacing: 8) {
            Text("In-app ring volume (doesn't affect lock-screen)")
@@ -77,6 +79,8 @@ struct AlarmFormView: View {
                .font(.caption)
              
              Slider(value: detailVM.volumeBinding, in: 0.0...1.0, step: 0.1)
+               .accessibilityLabel("In-app alarm volume")
+               .accessibilityValue("\(Int(detailVM.draft.volume * 100)) percent")
              
              Image(systemName: "speaker.wave.3.fill")
                .foregroundColor(.secondary)
@@ -167,11 +171,14 @@ struct AlarmFormView: View {
            onSave()
          }
          .disabled(!detailVM.isValid)
+         .accessibilityLabel("Save alarm")
+         .accessibilityHint(detailVM.isValid ? "Saves the alarm with current settings" : "Cannot save, alarm requires a QR code challenge")
        }
        ToolbarItem(placement: .navigationBarLeading) {
          Button("Cancel") {
            // handle cancel
          }
+         .accessibilityLabel("Cancel alarm creation")
        }
      }
      .navigationDestination(isPresented: $isAddingChallenge) {
@@ -245,6 +252,7 @@ struct ChallengeRow: View {
            .foregroundColor(.secondary)
        }
        .buttonStyle(.plain)
+       .accessibilityLabel("Remove \(kind.displayName) challenge")
      }
 
      if kind == .qr {

@@ -383,8 +383,20 @@ final class DismissalFlowViewModel: ObservableObject {
             
             // Brief delay for user feedback, then return to scanning
             Task {
-                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
-                
+                do {
+                    try await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
+
+                } catch is CancellationError {
+                    // Expected: Task cancelled when user dismisses or view disappears
+                    print("📋 DismissalFlow: QR feedback delay cancelled (user dismissed or view changed)")
+                    return  // Early exit - don't proceed to state transition
+
+                } catch {
+                    // Unexpected: Task.sleep should only throw CancellationError
+                    print("⚠️ DismissalFlow: Unexpected Task.sleep error: \(error)")
+                    // Continue to state transition in this rare case
+                }
+
                 await MainActor.run {
                     // Atomic guard: only transition if not in the middle of another transition
                     if state == .validating && !isTransitioning && !hasCompletedSuccess {
@@ -496,8 +508,33 @@ final class DismissalFlowViewModel: ObservableObject {
             if alarm.repeatDays.isEmpty {
                 var updatedAlarm = alarm
                 updatedAlarm.isEnabled = false
-                try? await alarmStorage.saveAlarms([updatedAlarm])
-                print("DismissalFlow: One-time alarm dismissed and disabled")
+
+                do {
+                    try await alarmStorage.saveAlarms([updatedAlarm])
+                    print("✅ DismissalFlow: One-time alarm disabled successfully")
+
+                } catch {
+                    // CRITICAL: If save fails, the alarm will fire again tomorrow
+                    print("❌ DismissalFlow: CRITICAL - Failed to disable one-time alarm: \(error)")
+
+                    // Log to reliability logger for production monitoring
+                    reliabilityLogger.log(
+                        .stopFailed,
+                        alarmId: alarm.id,
+                        details: [
+                            "reason": "persistence_failed_on_disable",
+                            "error": "\(error)",
+                            "context": "one_time_alarm_disable_after_dismiss"
+                        ]
+                    )
+
+                    // Set failure state and early return - don't proceed to success
+                    phase = .failed("Failed to save alarm settings. The alarm may fire again tomorrow.")
+                    setState(.failed(.alarmNotFound))  // Reuse closest failure reason
+
+                    // Early return prevents success logging and UI transition
+                    return
+                }
             }
 
             reliabilityLogger.log(
